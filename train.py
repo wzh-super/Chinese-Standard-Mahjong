@@ -3,24 +3,30 @@ from actor import Actor
 from learner import Learner
 
 if __name__ == '__main__':
+    # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
-        'replay_buffer_size': 50000,
-        'replay_buffer_episode': 400,
+        # === 经验收集 ===
+        'replay_buffer_size': 200000,     # 90GB内存，可以存更多经验
+        'replay_buffer_episode': 1000,    # 队列容量
         'model_pool_size': 20,
         'model_pool_name': 'model-pool',
-        'num_actors': 24,
-        'episodes_per_actor': 1000,
-        'gamma': 0.98,
-        'lambda': 0.95,
-        'min_sample': 200,
-        'batch_size': 256,
-        'epochs': 5,
-        'clip': 0.2,
-        'lr': 1e-4,
-        'value_coeff': 1,
-        'entropy_coeff': 0.01,
+        'num_actors': 24,                 # 25核留1核给learner
+        'episodes_per_actor': 5000,       # 每个actor跑更多局
+
+        # === PPO 参数 ===
+        'gamma': 0.99,                    # 折扣因子，稍微提高
+        'lambda': 0.95,                   # GAE参数
+        'min_sample': 1000,               # 开始训练前的最小样本数
+        'batch_size': 1024,               # 4090可以开大batch
+        'epochs': 5,                      # 每批数据的PPO迭代次数
+        'clip': 0.2,                      # PPO裁剪范围
+        'lr': 3e-4,                       # 学习率，大batch可以稍大
+        'value_coeff': 0.5,               # 价值损失系数
+        'entropy_coeff': 0.01,            # 熵正则系数
+
+        # === 保存 ===
         'device': 'cuda',
-        'ckpt_save_interval': 300,
+        'ckpt_save_interval': 300,        # 5分钟保存一次
         'ckpt_save_path': './checkpoint/'
     }
     

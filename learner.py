@@ -1,4 +1,5 @@
 from multiprocessing import Process
+import os
 import time
 import numpy as np
 import torch
@@ -17,6 +18,11 @@ class Learner(Process):
         self.config = config
     
     def run(self):
+        # create checkpoint directory if not exists
+        ckpt_path = self.config['ckpt_save_path']
+        if not os.path.exists(ckpt_path):
+            os.makedirs(ckpt_path)
+
         # create tensorboard writer
         writer = SummaryWriter('./runs')
 
