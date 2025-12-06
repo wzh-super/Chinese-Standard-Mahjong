@@ -1,6 +1,7 @@
 from multiprocessing import Process
 import os
 import time
+from datetime import datetime
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -23,8 +24,9 @@ class Learner(Process):
         if not os.path.exists(ckpt_path):
             os.makedirs(ckpt_path)
 
-        # create tensorboard writer
-        writer = SummaryWriter('./runs')
+        # create tensorboard writer with timestamp
+        exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+        writer = SummaryWriter(f'./runs/{exp_name}')
 
         # create model pool
         model_pool = ModelPoolServer(self.config['model_pool_size'], self.config['model_pool_name'])
