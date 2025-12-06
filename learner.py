@@ -19,13 +19,15 @@ class Learner(Process):
         self.config = config
     
     def run(self):
+        # create experiment name with timestamp
+        exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+
         # create checkpoint directory if not exists
-        ckpt_path = self.config['ckpt_save_path']
+        ckpt_path = os.path.join(self.config['ckpt_save_path'], exp_name)
         if not os.path.exists(ckpt_path):
             os.makedirs(ckpt_path)
 
         # create tensorboard writer with timestamp
-        exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
         writer = SummaryWriter(f'./runs/{exp_name}')
 
         # create model pool
@@ -102,7 +104,7 @@ class Learner(Process):
             # save checkpoints
             t = time.time()
             if t - cur_time > self.config['ckpt_save_interval']:
-                path = self.config['ckpt_save_path'] + 'model_%d.pt' % iterations
+                path = os.path.join(ckpt_path, 'model_%d.pt' % iterations)
                 torch.save(model.state_dict(), path)
                 cur_time = t
             iterations += 1
