@@ -1,0 +1,7 @@
+*.docx
+CLAUDE.md
+.vscode/
+checkpoint/
+runs/
+__pycache__/
+*.pyc
