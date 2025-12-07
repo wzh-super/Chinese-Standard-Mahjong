@@ -6,3 +6,8 @@ runs/
 __pycache__/
 *.pyc
 data/
+supervised_checkpoint/
+supervised_runs/
+*.pt
+*.pth
+*.pkl
