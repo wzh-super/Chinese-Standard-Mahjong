@@ -5,7 +5,7 @@ import torch
 from replay_buffer import ReplayBuffer
 from model_pool import ModelPoolClient
 from env import MahjongGBEnv
-from feature import FeatureAgent
+from feature_v2 import FeatureAgentV2
 from model import CNNModel
 
 class Actor(Process):
@@ -31,7 +31,7 @@ class Actor(Process):
         model.load_state_dict(state_dict)
         
         # collect data
-        env = MahjongGBEnv(config = {'agent_clz': FeatureAgent})
+        env = MahjongGBEnv(config = {'agent_clz': FeatureAgentV2})
         policies = {player : model for player in env.agent_names} # all four players use the latest model
         
         for episode in range(self.config['episodes_per_actor']):

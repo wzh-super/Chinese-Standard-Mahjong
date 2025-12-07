@@ -26,20 +26,25 @@ class CNNModel(nn.Module):
     深度ResNet风格的Actor-Critic网络
 
     结构：
-    - 输入卷积: 6 → 128 通道
+    - 输入卷积: in_channels → 128 通道
     - 8个残差块 (共16层卷积)
     - 策略头: 128*4*9 → 512 → 235
     - 价值头: 128*4*9 → 512 → 1
+
+    输入通道数:
+    - 旧版 (FeatureAgent): 6 通道
+    - 新版 (FeatureAgentV2): 147 通道
     """
 
-    def __init__(self, num_res_blocks=8, channels=128):
+    def __init__(self, num_res_blocks=8, channels=128, in_channels=147):
         super().__init__()
 
         self.num_res_blocks = num_res_blocks
         self.channels = channels
+        self.in_channels = in_channels
 
         # 输入卷积层
-        self.input_conv = nn.Conv2d(6, channels, 3, 1, 1, bias=False)
+        self.input_conv = nn.Conv2d(in_channels, channels, 3, 1, 1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
 
         # 残差块

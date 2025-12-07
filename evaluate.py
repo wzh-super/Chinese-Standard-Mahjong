@@ -12,7 +12,7 @@ import numpy as np
 from collections import defaultdict
 
 from env import MahjongGBEnv
-from feature import FeatureAgent
+from feature_v2 import FeatureAgentV2
 from model import CNNModel
 
 
@@ -49,7 +49,7 @@ def play_one_game(models, device='cpu'):
         rewards: dict, 每个玩家的最终奖励
         winner: str, 赢家名称 (如果有)
     """
-    env = MahjongGBEnv(config={'agent_clz': FeatureAgent})
+    env = MahjongGBEnv(config={'agent_clz': FeatureAgentV2})
     obs = env.reset()
     done = False
 

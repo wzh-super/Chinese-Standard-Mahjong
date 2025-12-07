@@ -1,5 +1,5 @@
 # Agent part
-from feature import FeatureAgent
+from feature_v2 import FeatureAgentV2
 
 # Model part
 from model import CNNModel
@@ -28,7 +28,7 @@ if __name__ == '__main__':
         request = request.split()
         if request[0] == '0':
             seatWind = int(request[1])
-            agent = FeatureAgent(seatWind)
+            agent = FeatureAgentV2(seatWind)
             agent.request2obs('Wind %s' % request[2])
             print('PASS')
         elif request[0] == '1':
