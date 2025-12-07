@@ -1,8 +1,14 @@
 from replay_buffer import ReplayBuffer
 from actor import Actor
 from learner import Learner
+import argparse
 
 if __name__ == '__main__':
+    # 命令行参数
+    parser = argparse.ArgumentParser(description='RL training for Mahjong')
+    parser.add_argument('--pretrain', type=str, default=None, help='Path to pretrained model from supervised learning')
+    args = parser.parse_args()
+
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
         # === 经验收集 ===
@@ -27,7 +33,10 @@ if __name__ == '__main__':
         # === 保存 ===
         'device': 'cuda',
         'ckpt_save_interval': 300,        # 5分钟保存一次
-        'ckpt_save_path': './checkpoint/'
+        'ckpt_save_path': './checkpoint/',
+
+        # === 预训练模型 ===
+        'pretrain_path': args.pretrain,
     }
     
     replay_buffer = ReplayBuffer(config['replay_buffer_size'], config['replay_buffer_episode'])

@@ -32,11 +32,17 @@ class Learner(Process):
 
         # create model pool
         model_pool = ModelPoolServer(self.config['model_pool_size'], self.config['model_pool_name'])
-        
+
         # initialize model params
         device = torch.device(self.config['device'])
         model = CNNModel()
-        
+
+        # load pretrained model if specified
+        if self.config.get('pretrain_path') and os.path.exists(self.config['pretrain_path']):
+            print(f"Loading pretrained model: {self.config['pretrain_path']}")
+            model.load_state_dict(torch.load(self.config['pretrain_path'], map_location='cpu'))
+            print("Pretrained model loaded successfully!")
+
         # send to model pool
         model_pool.push(model.state_dict()) # push cpu-only tensor to model_pool
         model = model.to(device)
