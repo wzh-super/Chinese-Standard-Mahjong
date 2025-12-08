@@ -22,13 +22,16 @@ if __name__ == '__main__':
         # === PPO 参数 ===
         'gamma': 0.99,                    # 折扣因子，稍微提高
         'lambda': 0.95,                   # GAE参数
-        'min_sample': 1000,               # 开始训练前的最小样本数
+        'min_sample': 5000,               # 开始训练前的最小样本数（提高初始多样性）
         'batch_size': 1024,               # 4090可以开大batch
         'epochs': 5,                      # 每批数据的PPO迭代次数
         'clip': 0.2,                      # PPO裁剪范围
-        'lr': 3e-4,                       # 学习率，大batch可以稍大
+        'lr': 1e-4,                       # 学习率（大batch适当降低）
+        'lr_min': 1e-5,                   # 学习率下限
+        'lr_decay_steps': 5000,           # 每隔多少步衰减
+        'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.01,            # 熵正则系数
+        'entropy_coeff': 0.02,            # 熵正则系数（增加探索）
 
         # === 保存 ===
         'device': 'cuda',
