@@ -33,6 +33,7 @@ if __name__ == '__main__':
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
         'entropy_coeff': 0.1,             # 熵正则系数（大幅增加，强制探索）
+        'kl_coeff': 1.0,                  # KL散度约束系数（保护预训练策略）
 
         # === 保存 ===
         'device': 'cuda',

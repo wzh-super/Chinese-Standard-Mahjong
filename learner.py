@@ -38,10 +38,18 @@ class Learner(Process):
         model = CNNModel()
 
         # load pretrained model if specified
+        pretrain_model = None
         if self.config.get('pretrain_path') and os.path.exists(self.config['pretrain_path']):
             print(f"Loading pretrained model: {self.config['pretrain_path']}")
             model.load_state_dict(torch.load(self.config['pretrain_path'], map_location='cpu'))
             print("Pretrained model loaded successfully!")
+            # 保存一份预训练模型用于KL约束
+            pretrain_model = CNNModel()
+            pretrain_model.load_state_dict(torch.load(self.config['pretrain_path'], map_location='cpu'))
+            pretrain_model = pretrain_model.to(device)
+            pretrain_model.eval()
+            for param in pretrain_model.parameters():
+                param.requires_grad = False
 
         # send to model pool
         model_pool.push(model.state_dict()) # push cpu-only tensor to model_pool
@@ -130,7 +138,19 @@ class Learner(Process):
                 policy_loss = -torch.mean(torch.min(surr1, surr2))
                 value_loss = torch.mean(F.mse_loss(values.squeeze(-1), targets))
                 entropy_loss = -torch.mean(action_dist.entropy())
-                loss = policy_loss + self.config['value_coeff'] * value_loss + self.config['entropy_coeff'] * entropy_loss
+
+                # KL散度约束：限制策略不能偏离预训练太远
+                kl_loss = torch.tensor(0.0).to(device)
+                if pretrain_model is not None:
+                    with torch.no_grad():
+                        pretrain_logits, _ = pretrain_model(states)
+                    pretrain_probs = F.softmax(pretrain_logits, dim=1)
+                    current_probs = F.softmax(logits, dim=1)
+                    # KL(pretrain || current)
+                    kl_loss = torch.mean(torch.sum(pretrain_probs * (torch.log(pretrain_probs + 1e-8) - torch.log(current_probs + 1e-8)), dim=1))
+
+                kl_coeff = self.config.get('kl_coeff', 0.5)
+                loss = policy_loss + self.config['value_coeff'] * value_loss + self.config['entropy_coeff'] * entropy_loss + kl_coeff * kl_loss
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 梯度裁剪，防止梯度爆炸
@@ -146,6 +166,7 @@ class Learner(Process):
             writer.add_scalar('Loss/policy', policy_loss.item(), iterations)
             writer.add_scalar('Loss/value', value_loss.item(), iterations)
             writer.add_scalar('Loss/entropy', entropy_loss.item(), iterations)
+            writer.add_scalar('Loss/kl', kl_loss.item(), iterations)
             writer.add_scalar('Loss/total', loss.item(), iterations)
             writer.add_scalar('Stats/advantage_mean', advs.mean().item(), iterations)
             writer.add_scalar('Stats/advantage_std', advs.std().item(), iterations)
