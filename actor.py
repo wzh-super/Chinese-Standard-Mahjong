@@ -54,9 +54,13 @@ class Actor(Process):
                         opp_meta = random.choice(model_list)
                     else:
                         opp_meta = latest
-                    opp_state = model_pool.load_model(opp_meta)
-                    if opp_state:
-                        opp.load_state_dict(opp_state)
+                    try:
+                        opp_state = model_pool.load_model(opp_meta)
+                        if opp_state:
+                            opp.load_state_dict(opp_state)
+                    except FileNotFoundError:
+                        # 极少情况：模型刚好被释放，保持对手当前模型不变
+                        pass
 
             # randomly choose main player position (for diverse seat wind)
             main_player_idx = random.randint(0, 3)

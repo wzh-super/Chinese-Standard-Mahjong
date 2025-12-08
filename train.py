@@ -14,7 +14,7 @@ if __name__ == '__main__':
         # === 经验收集 ===
         'replay_buffer_size': 200000,     # 90GB内存，可以存更多经验
         'replay_buffer_episode': 1000,    # 队列容量
-        'model_pool_size': 20,
+        'model_pool_size': 50,            # 增大缓冲，避免历史模型被过快释放
         'model_pool_name': 'model-pool',
         'num_actors': 24,                 # 25核留1核给learner
         'episodes_per_actor': 20000,      # 每个actor跑更多局（只收集1个玩家数据，需要4倍补偿）
