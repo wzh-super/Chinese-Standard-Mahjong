@@ -1,6 +1,7 @@
 from multiprocessing import Process
 import numpy as np
 import torch
+import random
 
 from replay_buffer import ReplayBuffer
 from model_pool import ModelPoolClient
@@ -9,39 +10,68 @@ from feature_v2 import FeatureAgentV2
 from model import CNNModel
 
 class Actor(Process):
-    
+
     def __init__(self, config, replay_buffer):
         super(Actor, self).__init__()
         self.replay_buffer = replay_buffer
         self.config = config
         self.name = config.get('name', 'Actor-?')
-        
+
     def run(self):
         torch.set_num_threads(1)
-    
+
         # connect to model pool
         model_pool = ModelPoolClient(self.config['model_pool_name'])
-        
-        # create network model
-        model = CNNModel()
-        
+
+        # create network models: 1 main + 3 opponents
+        main_model = CNNModel()
+        opponent_models = [CNNModel() for _ in range(3)]
+
         # load initial model
         version = model_pool.get_latest_model()
         state_dict = model_pool.load_model(version)
-        model.load_state_dict(state_dict)
-        
+        main_model.load_state_dict(state_dict)
+        for opp in opponent_models:
+            opp.load_state_dict(state_dict)
+
         # collect data
         env = MahjongGBEnv(config = {'agent_clz': FeatureAgentV2})
-        policies = {player : model for player in env.agent_names} # all four players use the latest model
-        
+
         for episode in range(self.config['episodes_per_actor']):
-            # update model
+            # update main model to latest
             latest = model_pool.get_latest_model()
             if latest['id'] > version['id']:
                 state_dict = model_pool.load_model(latest)
-                model.load_state_dict(state_dict)
+                main_model.load_state_dict(state_dict)
                 version = latest
-            
+
+            # randomly assign opponent models from history pool
+            model_list = model_pool.get_model_list()
+            if len(model_list) > 1:
+                for opp in opponent_models:
+                    # 50% latest, 50% random historical
+                    if random.random() < 0.5:
+                        opp_meta = random.choice(model_list)
+                    else:
+                        opp_meta = latest
+                    opp_state = model_pool.load_model(opp_meta)
+                    if opp_state:
+                        opp.load_state_dict(opp_state)
+
+            # randomly choose main player position (for diverse seat wind)
+            main_player_idx = random.randint(0, 3)
+            main_player_name = f'player_{main_player_idx + 1}'
+
+            # assign models: main player uses main_model, others use opponent_models
+            opp_idx = 0
+            models = {}
+            for i, agent_name in enumerate(env.agent_names):
+                if i == main_player_idx:
+                    models[agent_name] = main_model
+                else:
+                    models[agent_name] = opponent_models[opp_idx]
+                    opp_idx += 1
+
             # run one episode and collect data
             obs = env.reset()
             episode_data = {agent_name: {
@@ -65,9 +95,11 @@ class Actor(Process):
                     agent_data['state']['action_mask'].append(state['action_mask'])
                     state['observation'] = torch.tensor(state['observation'], dtype = torch.float).unsqueeze(0)
                     state['action_mask'] = torch.tensor(state['action_mask'], dtype = torch.float).unsqueeze(0)
-                    model.train(False) # Batch Norm inference mode
+
+                    current_model = models[agent_name]
+                    current_model.train(False) # Batch Norm inference mode
                     with torch.no_grad():
-                        logits, value = model(state)
+                        logits, value = current_model(state)
                         action_dist = torch.distributions.Categorical(logits = logits)
                         action = action_dist.sample().item()
                         value = value.item()
@@ -80,36 +112,36 @@ class Actor(Process):
                 for agent_name in rewards:
                     episode_data[agent_name]['reward'].append(rewards[agent_name])
                 obs = next_obs
-            print(self.name, 'Episode', episode, 'Model', latest['id'], 'Reward', rewards)
-            
-            # postprocessing episode data for each agent
-            for agent_name, agent_data in episode_data.items():
-                if len(agent_data['action']) < len(agent_data['reward']):
-                    agent_data['reward'].pop(0)
-                obs = np.stack(agent_data['state']['observation'])
-                mask = np.stack(agent_data['state']['action_mask'])
-                actions = np.array(agent_data['action'], dtype = np.int64)
-                rewards = np.array(agent_data['reward'], dtype = np.float32)
-                values = np.array(agent_data['value'], dtype = np.float32)
-                next_values = np.array(agent_data['value'][1:] + [0], dtype = np.float32)
-                
-                td_target = rewards + next_values * self.config['gamma']
-                td_delta = td_target - values
-                advs = []
-                adv = 0
-                for delta in td_delta[::-1]:
-                    adv = self.config['gamma'] * self.config['lambda'] * adv + delta
-                    advs.append(adv) # GAE
-                advs.reverse()
-                advantages = np.array(advs, dtype = np.float32)
-                
-                # send samples to replay_buffer (per agent)
-                self.replay_buffer.push({
-                    'state': {
-                        'observation': obs,
-                        'action_mask': mask
-                    },
-                    'action': actions,
-                    'adv': advantages,
-                    'target': td_target
-                })
+            print(self.name, 'Episode', episode, 'Model', latest['id'], 'MainPlayer', main_player_name, 'Reward', rewards)
+
+            # postprocessing episode data - only for main player
+            agent_data = episode_data[main_player_name]
+            if len(agent_data['action']) < len(agent_data['reward']):
+                agent_data['reward'].pop(0)
+            obs_arr = np.stack(agent_data['state']['observation'])
+            mask = np.stack(agent_data['state']['action_mask'])
+            actions = np.array(agent_data['action'], dtype = np.int64)
+            rewards = np.array(agent_data['reward'], dtype = np.float32)
+            values = np.array(agent_data['value'], dtype = np.float32)
+            next_values = np.array(agent_data['value'][1:] + [0], dtype = np.float32)
+
+            td_target = rewards + next_values * self.config['gamma']
+            td_delta = td_target - values
+            advs = []
+            adv = 0
+            for delta in td_delta[::-1]:
+                adv = self.config['gamma'] * self.config['lambda'] * adv + delta
+                advs.append(adv) # GAE
+            advs.reverse()
+            advantages = np.array(advs, dtype = np.float32)
+
+            # send samples to replay_buffer (only main player)
+            self.replay_buffer.push({
+                'state': {
+                    'observation': obs_arr,
+                    'action_mask': mask
+                },
+                'action': actions,
+                'adv': advantages,
+                'target': td_target
+            })
