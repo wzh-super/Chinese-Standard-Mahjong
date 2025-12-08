@@ -31,7 +31,7 @@ if __name__ == '__main__':
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.02,            # 熵正则系数（增加探索）
+        'entropy_coeff': 0.05,            # 熵正则系数（增加探索，防止策略崩溃）
 
         # === 保存 ===
         'device': 'cuda',

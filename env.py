@@ -115,9 +115,9 @@ class MahjongGBEnv():
                                 i = (self.curPlayer + j) % 4
                                 if t[i][0] != 'Pass': raise Error(i)
                             if self.wallLast:
-                                # A draw
+                                # A draw - 流局给负奖励，鼓励进攻
                                 self.obs = {i : self.agents[i].request2obs('Huang') for i in range(4)}
-                                self.reward = [0, 0, 0, 0]
+                                self.reward = [-10, -10, -10, -10]
                                 self.done = True
                             else:
                                 # Next player
