@@ -26,12 +26,12 @@ if __name__ == '__main__':
         'batch_size': 1024,               # 4090可以开大batch
         'epochs': 5,                      # 每批数据的PPO迭代次数
         'clip': 0.2,                      # PPO裁剪范围
-        'lr': 1e-4,                       # 学习率（大batch适当降低）
+        'lr': 3e-5,                       # 学习率（降低，保护预训练知识）
         'lr_min': 1e-5,                   # 学习率下限
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.05,            # 熵正则系数（增加探索，防止策略崩溃）
+        'entropy_coeff': 0.1,             # 熵正则系数（大幅增加，强制探索）
 
         # === 保存 ===
         'device': 'cuda',
