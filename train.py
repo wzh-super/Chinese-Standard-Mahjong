@@ -23,6 +23,7 @@ if __name__ == '__main__':
         'gamma': 0.99,                    # 折扣因子，稍微提高
         'lambda': 0.95,                   # GAE参数
         'min_sample': 5000,               # 开始训练前的最小样本数（提高初始多样性）
+        'value_warmup_steps': 2000,       # Value预热步数（冻结Policy，只训练Value）
         'batch_size': 1024,               # 4090可以开大batch
         'epochs': 5,                      # 每批数据的PPO迭代次数
         'clip': 0.2,                      # PPO裁剪范围

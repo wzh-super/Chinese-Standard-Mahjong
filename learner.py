@@ -58,7 +58,44 @@ class Learner(Process):
         # wait for initial samples
         while self.replay_buffer.size() < self.config['min_sample']:
             time.sleep(0.1)
-        
+
+        # === Value预热阶段：冻结Policy，只训练Value ===
+        value_warmup_steps = self.config.get('value_warmup_steps', 1000)
+        if value_warmup_steps > 0:
+            print(f"Starting value warmup for {value_warmup_steps} steps...")
+            # 冻结backbone和policy头
+            for name, param in model.named_parameters():
+                if '_value_branch' not in name:
+                    param.requires_grad = False
+
+            value_optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=self.config['lr'] * 10  # value学习率可以更高
+            )
+
+            for warmup_step in range(value_warmup_steps):
+                batch = self.replay_buffer.sample(self.config['batch_size'])
+                obs = torch.tensor(batch['state']['observation']).to(device)
+                mask = torch.tensor(batch['state']['action_mask']).to(device)
+                states = {'observation': obs, 'action_mask': mask}
+                targets = torch.tensor(batch['target']).to(device)
+
+                model.train(True)
+                _, values = model(states)
+                value_loss = F.mse_loss(values.squeeze(-1), targets)
+
+                value_optimizer.zero_grad()
+                value_loss.backward()
+                value_optimizer.step()
+
+                if (warmup_step + 1) % 100 == 0:
+                    print(f"Value warmup step {warmup_step + 1}/{value_warmup_steps}, loss: {value_loss.item():.4f}")
+
+            # 解冻所有参数
+            for param in model.parameters():
+                param.requires_grad = True
+            print("Value warmup completed!")
+
         cur_time = time.time()
         iterations = 0
         while True:
