@@ -30,14 +30,14 @@ class Actor(Process):
     def _select_opponent_type(self):
         """
         随机选择对手类型
-        比例：最新30%，预训练30%，历史检查点20%，随机20%
+        比例：最新40%，预训练30%，历史检查点25%，随机5%
         """
         r = random.random()
-        if r < 0.3:
+        if r < 0.40:
             return OPPONENT_LATEST
-        elif r < 0.6:
+        elif r < 0.70:
             return OPPONENT_PRETRAIN
-        elif r < 0.8:
+        elif r < 0.95:
             return OPPONENT_CHECKPOINT
         else:
             return OPPONENT_RANDOM
@@ -112,8 +112,8 @@ class Actor(Process):
                         opp_state = model_pool.load_model(latest)
                         if opp_state:
                             opp.load_state_dict(opp_state)
-                    except FileNotFoundError:
-                        pass
+                    except Exception:
+                        pass  # SharedMemory可能已释放，保持原模型
 
                 elif opp_type == OPPONENT_PRETRAIN:
                     # 使用预训练模型
@@ -126,7 +126,7 @@ class Actor(Process):
                             opp_state = model_pool.load_model(latest)
                             if opp_state:
                                 opp.load_state_dict(opp_state)
-                        except FileNotFoundError:
+                        except Exception:
                             pass
 
                 elif opp_type == OPPONENT_CHECKPOINT:
@@ -138,7 +138,7 @@ class Actor(Process):
                             opp_state = model_pool.load_model(latest)
                             if opp_state:
                                 opp.load_state_dict(opp_state)
-                        except FileNotFoundError:
+                        except Exception:
                             pass
 
                 elif opp_type == OPPONENT_RANDOM:
