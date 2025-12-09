@@ -32,14 +32,14 @@ if __name__ == '__main__':
         'value_warmup_steps': 2000,       # Value预热步数（冻结Policy，只训练Value）
         'batch_size': 1024,               # 4090可以开大batch
         'epochs': 5,                      # 每批数据的PPO迭代次数
-        'clip': 0.2,                      # PPO裁剪范围
-        'lr': 1e-4,                       # 学习率
+        'clip': 0.15,                     # PPO裁剪范围（稍降低）
+        'lr': 5e-5,                       # 学习率（适中）
         'lr_min': 1e-5,                   # 学习率下限
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.05,            # 熵正则系数
-        'kl_coeff': 0.0,                  # KL约束关闭（30%预训练对手已提供隐式约束）
+        'entropy_coeff': 0.03,            # 熵正则系数（降低）
+        'kl_coeff': 0.05,                 # KL约束（保留但减半）
 
         # === 保存 ===
         'device': 'cuda',
