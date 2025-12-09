@@ -11,3 +11,4 @@ supervised_runs/
 *.pt
 *.pth
 *.pkl
+output.txt
