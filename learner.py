@@ -19,11 +19,11 @@ class Learner(Process):
         self.config = config
     
     def run(self):
-        # create experiment name with timestamp
-        exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+        # 使用config中预先生成的实验名称和检查点路径
+        exp_name = self.config.get('exp_name', datetime.now().strftime('%Y%m%d_%H%M%S'))
+        ckpt_path = self.config.get('ckpt_save_path', './checkpoint/')
 
         # create checkpoint directory if not exists
-        ckpt_path = os.path.join(self.config['ckpt_save_path'], exp_name)
         if not os.path.exists(ckpt_path):
             os.makedirs(ckpt_path)
 

@@ -2,12 +2,18 @@ from replay_buffer import ReplayBuffer
 from actor import Actor
 from learner import Learner
 import argparse
+from datetime import datetime
+import os
 
 if __name__ == '__main__':
     # 命令行参数
     parser = argparse.ArgumentParser(description='RL training for Mahjong')
     parser.add_argument('--pretrain', type=str, default=None, help='Path to pretrained model from supervised learning')
     args = parser.parse_args()
+
+    # 生成本次运行的实验名称
+    exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+    ckpt_save_path = os.path.join('./checkpoint/', exp_name)
 
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
@@ -32,13 +38,14 @@ if __name__ == '__main__':
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.1,             # 熵正则系数（大幅增加，强制探索）
-        'kl_coeff': 1.0,                  # KL散度约束系数（保护预训练策略）
+        'entropy_coeff': 0.05,            # 熵正则系数
+        'kl_coeff': 0.1,                  # KL散度约束系数（降低，因为已有预训练对手作为隐式约束）
 
         # === 保存 ===
         'device': 'cuda',
         'ckpt_save_interval': 300,        # 5分钟保存一次
-        'ckpt_save_path': './checkpoint/',
+        'ckpt_save_path': ckpt_save_path, # 本次运行的检查点目录
+        'exp_name': exp_name,             # 实验名称
 
         # === 预训练模型 ===
         'pretrain_path': args.pretrain,
