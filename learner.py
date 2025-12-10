@@ -37,15 +37,32 @@ class Learner(Process):
         device = torch.device(self.config['device'])
         model = CNNModel()
 
-        # load pretrained model if specified
+        # 加载模型：优先使用 resume，其次使用 pretrain
         pretrain_model = None
-        if self.config.get('pretrain_path') and os.path.exists(self.config['pretrain_path']):
-            print(f"Loading pretrained model: {self.config['pretrain_path']}")
-            model.load_state_dict(torch.load(self.config['pretrain_path'], map_location='cpu'))
+        resume_path = self.config.get('resume_model_path')
+        pretrain_path = self.config.get('pretrain_path')
+
+        if resume_path and os.path.exists(resume_path):
+            # 继续训练：从检查点恢复
+            print(f"Resuming model from: {resume_path}")
+            model.load_state_dict(torch.load(resume_path, map_location='cpu'))
+            print("Model resumed successfully!")
+            # 继续训练时，如果有 pretrain 则用于 KL 约束，否则不使用 KL 约束
+            if pretrain_path and os.path.exists(pretrain_path):
+                pretrain_model = CNNModel()
+                pretrain_model.load_state_dict(torch.load(pretrain_path, map_location='cpu'))
+                pretrain_model = pretrain_model.to(device)
+                pretrain_model.eval()
+                for param in pretrain_model.parameters():
+                    param.requires_grad = False
+        elif pretrain_path and os.path.exists(pretrain_path):
+            # 新训练：使用预训练模型
+            print(f"Loading pretrained model: {pretrain_path}")
+            model.load_state_dict(torch.load(pretrain_path, map_location='cpu'))
             print("Pretrained model loaded successfully!")
             # 保存一份预训练模型用于KL约束
             pretrain_model = CNNModel()
-            pretrain_model.load_state_dict(torch.load(self.config['pretrain_path'], map_location='cpu'))
+            pretrain_model.load_state_dict(torch.load(pretrain_path, map_location='cpu'))
             pretrain_model = pretrain_model.to(device)
             pretrain_model.eval()
             for param in pretrain_model.parameters():
@@ -68,7 +85,11 @@ class Learner(Process):
             time.sleep(0.1)
 
         # === Value预热阶段：冻结Policy，只训练Value ===
+        # 继续训练时跳过 warmup
         value_warmup_steps = self.config.get('value_warmup_steps', 1000)
+        if resume_path:
+            value_warmup_steps = 0
+            print("Skipping value warmup (resuming from checkpoint)")
         if value_warmup_steps > 0:
             print(f"Starting value warmup for {value_warmup_steps} steps...")
             # 冻结backbone和policy头

@@ -4,16 +4,36 @@ from learner import Learner
 import argparse
 from datetime import datetime
 import os
+import glob
 
 if __name__ == '__main__':
     # 命令行参数
     parser = argparse.ArgumentParser(description='RL training for Mahjong')
     parser.add_argument('--pretrain', type=str, default=None, help='Path to pretrained model from supervised learning')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint directory to resume training')
     args = parser.parse_args()
 
-    # 生成本次运行的实验名称
-    exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
-    ckpt_save_path = os.path.join('./checkpoint/', exp_name)
+    # 确定实验名称和检查点路径
+    if args.resume:
+        # 继续训练：使用已有的 checkpoint 目录
+        ckpt_save_path = args.resume.rstrip('/\\')
+        exp_name = os.path.basename(ckpt_save_path)
+
+        # 找到目录中最新的检查点
+        ckpt_files = glob.glob(os.path.join(ckpt_save_path, '*.pt'))
+        if ckpt_files:
+            # 按修改时间排序，取最新的
+            latest_ckpt = max(ckpt_files, key=os.path.getmtime)
+            resume_model_path = latest_ckpt
+            print(f"Resuming from checkpoint: {latest_ckpt}")
+        else:
+            print(f"Warning: No checkpoint files found in {ckpt_save_path}")
+            resume_model_path = None
+    else:
+        # 新训练：生成新的实验名称
+        exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ckpt_save_path = os.path.join('./checkpoint/', exp_name)
+        resume_model_path = None
 
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
@@ -49,6 +69,7 @@ if __name__ == '__main__':
 
         # === 预训练模型 ===
         'pretrain_path': args.pretrain,
+        'resume_model_path': resume_model_path,  # 继续训练时的检查点路径
     }
     
     replay_buffer = ReplayBuffer(config['replay_buffer_size'], config['replay_buffer_episode'])
