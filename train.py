@@ -58,8 +58,8 @@ if __name__ == '__main__':
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.03,            # 熵正则系数（降低）
-        'kl_coeff': 0.05,                 # KL约束（保留但减半）
+        'entropy_coeff': 0.01,            # 熵正则系数（降低，减少随机探索）
+        'kl_coeff': 0.0,                  # 去掉KL约束，让模型自由探索
 
         # === 保存 ===
         'device': 'cuda',

@@ -27,20 +27,39 @@ class Actor(Process):
         self.config = config
         self.name = config.get('name', 'Actor-?')
 
-    def _select_opponent_type(self):
+    def _select_opponent_type(self, episode):
         """
-        随机选择对手类型
-        比例：最新40%，预训练30%，历史检查点25%，随机5%
+        根据训练进度动态调整对手比例（课程学习）
+
+        阶段1 (0-3万局)：稳固基础，预训练+自对弈（检查点还少）
+        阶段2 (3-10万局)：过渡期，自对弈 > 检查点
+        阶段3 (10万+)：自我提升，检查点 > 自对弈
         """
-        r = random.random()
-        if r < 0.40:
-            return OPPONENT_LATEST
-        elif r < 0.70:
-            return OPPONENT_PRETRAIN
-        elif r < 0.95:
-            return OPPONENT_CHECKPOINT
+        if episode < 20000:
+            # 预训练70%, 最新30%, 检查点0%
+            r = random.random()
+            if r < 0.70:
+                return OPPONENT_PRETRAIN
+            else:
+                return OPPONENT_LATEST
+        elif episode < 60000:
+            # 预训练40%, 最新35%, 检查点25%
+            r = random.random()
+            if r < 0.40:
+                return OPPONENT_PRETRAIN
+            elif r < 0.75:
+                return OPPONENT_LATEST
+            else:
+                return OPPONENT_CHECKPOINT
         else:
-            return OPPONENT_RANDOM
+            # 预训练20%, 最新30%, 检查点50%
+            r = random.random()
+            if r < 0.20:
+                return OPPONENT_PRETRAIN
+            elif r < 0.50:
+                return OPPONENT_LATEST
+            else:
+                return OPPONENT_CHECKPOINT
 
     def _load_checkpoint_model(self, model):
         """从本次运行的检查点目录随机加载一个模型"""
@@ -104,7 +123,7 @@ class Actor(Process):
 
             # 为每个对手随机选择类型和加载对应模型
             for i, opp in enumerate(opponent_models):
-                opp_type = self._select_opponent_type()
+                opp_type = self._select_opponent_type(episode)
                 opponent_types[i] = opp_type
 
                 if opp_type == OPPONENT_LATEST:
