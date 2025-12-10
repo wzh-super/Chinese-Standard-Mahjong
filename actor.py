@@ -98,8 +98,9 @@ class Actor(Process):
             latest = model_pool.get_latest_model()
             if latest['id'] > version['id']:
                 state_dict = model_pool.load_model(latest)
-                main_model.load_state_dict(state_dict)
-                version = latest
+                if state_dict is not None:
+                    main_model.load_state_dict(state_dict)
+                    version = latest
 
             # 为每个对手随机选择类型和加载对应模型
             for i, opp in enumerate(opponent_models):

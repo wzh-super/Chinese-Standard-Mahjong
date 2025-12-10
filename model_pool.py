@@ -1,6 +1,15 @@
 from multiprocessing.shared_memory import SharedMemory, ShareableList
+from multiprocessing import resource_tracker
 import _pickle as cPickle
 import time
+
+
+def _unregister_from_resource_tracker(name):
+    """从 resource_tracker 中注销共享内存，防止进程退出时被自动清理"""
+    try:
+        resource_tracker.unregister(f'/{name}' if not name.startswith('/') else name, 'shared_memory')
+    except Exception:
+        pass
 
 class ModelPoolServer:
     
@@ -16,7 +25,11 @@ class ModelPoolServer:
         n = self.n % self.capacity
         if self.model_list[n]:
             # FIFO: release shared memory of older model
-            self.model_list[n]['memory'].unlink()
+            try:
+                self.model_list[n]['memory'].close()
+                self.model_list[n]['memory'].unlink()
+            except FileNotFoundError:
+                pass  # 共享内存可能已被其他进程的 resource_tracker 清理
         
         data = cPickle.dumps(state_dict) # model parameters serialized to bytes
         memory = SharedMemory(create = True, size = len(data))
@@ -74,6 +87,13 @@ class ModelPoolClient:
         self._update_model_list()
         n = metadata['id']
         if n < self.n - self.capacity: return None
-        memory = SharedMemory(name = metadata['_addr'])
-        state_dict = cPickle.loads(memory.buf)
-        return state_dict
+        try:
+            memory = SharedMemory(name = metadata['_addr'])
+            state_dict = cPickle.loads(memory.buf)
+            memory.close()
+            # 从 resource_tracker 注销，防止进程退出时自动 unlink（由 Server 统一管理）
+            _unregister_from_resource_tracker(metadata['_addr'])
+            return state_dict
+        except FileNotFoundError:
+            # 共享内存已被 Server 释放（模型过旧）
+            return None
