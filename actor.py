@@ -30,33 +30,34 @@ class Actor(Process):
     def _select_opponent_type(self, episode):
         """
         根据训练进度动态调整对手比例（课程学习）
+        核心目标：打赢预训练模型
 
-        阶段1 (0-3万局)：稳固基础，预训练+自对弈（检查点还少）
-        阶段2 (3-10万局)：过渡期，自对弈 > 检查点
-        阶段3 (10万+)：自我提升，检查点 > 自对弈
+        阶段1 (0-2万局)：专注预训练
+        阶段2 (2-6万局)：预训练为主，引入检查点
+        阶段3 (6万+)：保持预训练，增加检查点
         """
         if episode < 20000:
-            # 预训练70%, 最新30%, 检查点0%
+            # 预训练85%, 自对弈15%
             r = random.random()
-            if r < 0.70:
+            if r < 0.85:
                 return OPPONENT_PRETRAIN
             else:
                 return OPPONENT_LATEST
         elif episode < 60000:
-            # 预训练40%, 最新35%, 检查点25%
+            # 预训练60%, 自对弈25%, 检查点15%
             r = random.random()
-            if r < 0.40:
+            if r < 0.60:
                 return OPPONENT_PRETRAIN
-            elif r < 0.75:
+            elif r < 0.85:
                 return OPPONENT_LATEST
             else:
                 return OPPONENT_CHECKPOINT
         else:
-            # 预训练20%, 最新30%, 检查点50%
+            # 预训练40%, 自对弈25%, 检查点35%
             r = random.random()
-            if r < 0.20:
+            if r < 0.40:
                 return OPPONENT_PRETRAIN
-            elif r < 0.50:
+            elif r < 0.65:
                 return OPPONENT_LATEST
             else:
                 return OPPONENT_CHECKPOINT

@@ -160,9 +160,23 @@ class Learner(Process):
                 value_loss = torch.mean(F.mse_loss(values.squeeze(-1), targets))
                 entropy_loss = -torch.mean(action_dist.entropy())
 
+                # 动态调整 KL 约束和熵系数（课程学习）
+                # 阶段1 (0-2万iter): 强KL约束，适中探索 → 稳固基础
+                # 阶段2 (2-6万iter): 弱KL约束，降低探索 → 自由探索
+                # 阶段3 (6万+iter): 无KL约束，最低探索 → 策略收敛
+                if iterations < 20000:
+                    kl_coeff = 0.1
+                    entropy_coeff = 0.02
+                elif iterations < 60000:
+                    kl_coeff = 0.02
+                    entropy_coeff = 0.01
+                else:
+                    kl_coeff = 0.0
+                    entropy_coeff = 0.005
+
                 # KL散度约束：限制策略不能偏离预训练太远
                 kl_loss = torch.tensor(0.0).to(device)
-                if pretrain_model is not None:
+                if pretrain_model is not None and kl_coeff > 0:
                     with torch.no_grad():
                         pretrain_logits, _ = pretrain_model(states)
                     pretrain_probs = F.softmax(pretrain_logits, dim=1)
@@ -170,8 +184,7 @@ class Learner(Process):
                     # KL(pretrain || current)
                     kl_loss = torch.mean(torch.sum(pretrain_probs * (torch.log(pretrain_probs + 1e-8) - torch.log(current_probs + 1e-8)), dim=1))
 
-                kl_coeff = self.config.get('kl_coeff', 0.5)
-                loss = policy_loss + self.config['value_coeff'] * value_loss + self.config['entropy_coeff'] * entropy_loss + kl_coeff * kl_loss
+                loss = policy_loss + self.config['value_coeff'] * value_loss + entropy_coeff * entropy_loss + kl_coeff * kl_loss
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 梯度裁剪，防止梯度爆炸
@@ -194,6 +207,8 @@ class Learner(Process):
             writer.add_scalar('Stats/value_mean', values.mean().item(), iterations)
             writer.add_scalar('Stats/buffer_size', self.replay_buffer.stats['sample_in'], iterations)
             writer.add_scalar('Stats/learning_rate', current_lr, iterations)
+            writer.add_scalar('Params/kl_coeff', kl_coeff, iterations)
+            writer.add_scalar('Params/entropy_coeff', entropy_coeff, iterations)
 
             # 学习率衰减（带下限）
             if (iterations + 1) % lr_decay_steps == 0 and current_lr > lr_min:
