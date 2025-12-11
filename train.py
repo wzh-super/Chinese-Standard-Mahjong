@@ -11,7 +11,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='RL training for Mahjong')
     parser.add_argument('--pretrain', type=str, default=None, help='Path to pretrained model from supervised learning')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint directory to resume training')
-    parser.add_argument('--self-play', action='store_true', help='Enable self-play mode (collect data from all latest model players)')
+    parser.add_argument('--self-play', action='store_true', default=True, help='Enable self-play mode (default: enabled)')
+    parser.add_argument('--no-self-play', action='store_false', dest='self_play', help='Disable self-play mode')
     parser.add_argument('--pretrain-prob', type=float, default=0.3, help='Probability of having one pretrain opponent per episode (only in self-play mode)')
     parser.add_argument('--kl-init', type=float, default=0.02, help='Initial KL coefficient')
     parser.add_argument('--kl-min', type=float, default=0.0, help='Minimum KL coefficient')
@@ -73,7 +74,7 @@ if __name__ == '__main__':
         'kl_decay_steps': args.kl_decay_steps,  # 衰减步数
 
         # === 自博弈模式 ===
-        'self_play_mode': getattr(args, 'self_play', False),  # 是否开启自博弈模式
+        'self_play_mode': args.self_play,  # 是否开启自博弈模式（默认开启）
         'pretrain_prob': args.pretrain_prob,  # 每局有预训练对手的概率
 
         # === 奖励模式 ===
