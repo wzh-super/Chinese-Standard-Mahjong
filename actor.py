@@ -264,14 +264,15 @@ class Actor(Process):
             # 打印对局信息
             if self.self_play_mode:
                 pretrain_name = f'player_{pretrain_player_idx + 1}' if pretrain_player_idx >= 0 else 'None'
-                # 计算所有最新模型玩家的平均reward
-                latest_rewards = [rewards[name] for name, ptype in player_types.items() if ptype == OPPONENT_LATEST]
-                avg_reward = sum(latest_rewards) / len(latest_rewards) if latest_rewards else 0
-                print(f"{self.name} Ep {episode} Model {latest['id']} Pretrain [{pretrain_name}] AvgReward {avg_reward:.1f}")
+                # 输出每个玩家的reward
+                reward_strs = [f"P{i+1}:{rewards[f'player_{i+1}']:.1f}" for i in range(4)]
+                print(f"{self.name} Ep {episode} Model {latest['id']} Pretrain [{pretrain_name}] Rewards [{', '.join(reward_strs)}]")
             else:
                 opp_type_str = ','.join([player_types[f'player_{i+1}'] for i in range(4) if player_types.get(f'player_{i+1}') != 'main'])
                 main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
-                print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Reward {rewards[main_player_name]:.1f}")
+                # 输出每个玩家的reward
+                reward_strs = [f"P{i+1}:{rewards[f'player_{i+1}']:.1f}" for i in range(4)]
+                print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Rewards [{', '.join(reward_strs)}]")
 
             # ==================== 数据采样 ====================
             if self.self_play_mode:
