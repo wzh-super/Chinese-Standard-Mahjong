@@ -17,9 +17,16 @@ class ReplayBuffer:
         if self.buffer is None: # called first time by learner
             self.buffer = deque(maxlen = self.capacity)
             self.stats = {'sample_in': 0, 'sample_out': 0, 'episode_in': 0}
+            self.reward_stats = {'sum': 0.0, 'count': 0, 'recent': deque(maxlen=1000)}
         while not self.queue.empty():
             # data flushed from queue to buffer
             episode_data = self.queue.get()
+            # 提取并统计episode_reward
+            if 'episode_reward' in episode_data:
+                ep_reward = episode_data.pop('episode_reward')
+                self.reward_stats['sum'] += ep_reward
+                self.reward_stats['count'] += 1
+                self.reward_stats['recent'].append(ep_reward)
             unpacked_data = self._unpack(episode_data)
             self.buffer.extend(unpacked_data)
             self.stats['sample_in'] += len(unpacked_data)

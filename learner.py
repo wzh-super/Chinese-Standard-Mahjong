@@ -161,13 +161,15 @@ class Learner(Process):
                 entropy_loss = -torch.mean(action_dist.entropy())
 
                 # 动态调整 KL 约束和熵系数（课程学习）
-                # 阶段1 (0-2万iter): 强KL约束，适中探索 → 稳固基础
-                # 阶段2 (2-6万iter): 弱KL约束，降低探索 → 自由探索
-                # 阶段3 (6万+iter): 无KL约束，最低探索 → 策略收敛
-                if iterations < 20000:
+                # 用 episode_in 和 Actor 同步阶段
+                # 阶段1: 0-48万局 (24 actor × 2万局)
+                # 阶段2: 48万-144万局 (24 actor × 6万局)
+                # 阶段3: 144万+局
+                total_episodes = self.replay_buffer.stats['episode_in']
+                if total_episodes < 480000:
                     kl_coeff = 0.1
                     entropy_coeff = 0.02
-                elif iterations < 60000:
+                elif total_episodes < 1440000:
                     kl_coeff = 0.02
                     entropy_coeff = 0.01
                 else:
@@ -209,6 +211,14 @@ class Learner(Process):
             writer.add_scalar('Stats/learning_rate', current_lr, iterations)
             writer.add_scalar('Params/kl_coeff', kl_coeff, iterations)
             writer.add_scalar('Params/entropy_coeff', entropy_coeff, iterations)
+            writer.add_scalar('Stats/total_episodes', total_episodes, iterations)
+            # 记录实际episode reward统计
+            if hasattr(self.replay_buffer, 'reward_stats') and self.replay_buffer.reward_stats['count'] > 0:
+                avg_reward = self.replay_buffer.reward_stats['sum'] / self.replay_buffer.reward_stats['count']
+                writer.add_scalar('Stats/episode_reward_avg', avg_reward, iterations)
+                if len(self.replay_buffer.reward_stats['recent']) > 0:
+                    recent_avg = sum(self.replay_buffer.reward_stats['recent']) / len(self.replay_buffer.reward_stats['recent'])
+                    writer.add_scalar('Stats/episode_reward_recent', recent_avg, iterations)
 
             # 学习率衰减（带下限）
             if (iterations + 1) % lr_decay_steps == 0 and current_lr > lr_min:

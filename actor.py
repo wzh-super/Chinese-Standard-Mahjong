@@ -262,6 +262,7 @@ class Actor(Process):
             advantages = np.array(advs, dtype=np.float32)
 
             # send samples to replay_buffer (only main player)
+            episode_reward = rewards[main_player_name]  # 本局最终reward
             self.replay_buffer.push({
                 'state': {
                     'observation': obs_arr,
@@ -269,5 +270,6 @@ class Actor(Process):
                 },
                 'action': actions_arr,
                 'adv': advantages,
-                'target': td_target
+                'target': td_target,
+                'episode_reward': episode_reward  # 用于统计
             })
