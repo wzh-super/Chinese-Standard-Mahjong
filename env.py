@@ -1,6 +1,7 @@
 from agent import MahjongGBAgent
 
 import random
+import math
 from collections import defaultdict
 
 try:
@@ -13,9 +14,9 @@ class Error(Exception):
     pass
 
 class MahjongGBEnv():
-    
+
     agent_names = ['player_%d' % i for i in range(1, 5)]
-    
+
     def __init__(self, config):
         assert 'agent_clz' in config, "must specify agent_clz to process features!"
         self.agentclz = config['agent_clz']
@@ -26,6 +27,8 @@ class MahjongGBEnv():
         self.normalizeReward = config.get('reward_norm', False)
         self.observation_space = self.agentclz.observation_space
         self.action_space = self.agentclz.action_space
+        # 奖励模式: 'simple'(统一惩罚), 'sqrt'(压缩但保留差异), 'original'(原始)
+        self.reward_mode = config.get('reward_mode', 'simple')
     
     def reset(self, prevalentWind = -1, tileWall = ''):
         # Create agents to process features
@@ -115,9 +118,13 @@ class MahjongGBEnv():
                                 i = (self.curPlayer + j) % 4
                                 if t[i][0] != 'Pass': raise Error(i)
                             if self.wallLast:
-                                # A draw
+                                # A draw - 流局
                                 self.obs = {i : self.agents[i].request2obs('Huang') for i in range(4)}
-                                self.reward = [0, 0, 0, 0]
+                                if self.reward_mode == 'original':
+                                    self.reward = [0, 0, 0, 0]
+                                else:
+                                    # simple/sqrt: 流局惩罚，鼓励进攻
+                                    self.reward = [-1, -1, -1, -1]
                                 self.done = True
                             else:
                                 # Next player
@@ -304,13 +311,40 @@ class MahjongGBEnv():
                 fanCnt += fanPoint * cnt
             if fanCnt < 8: raise Error('Not Enough Fans')
             self.obs = {i : self.agents[i].request2obs('Player %d Hu' % player) for i in range(4)}
-            if isSelfDrawn:
-                self.reward = [-(8 + fanCnt)] * 4
-                self.reward[player] = (8 + fanCnt) * 3
-            else:
-                self.reward = [-8] * 4
-                self.reward[player] = 8 * 3 + fanCnt
-                self.reward[self.curPlayer] -= fanCnt
+
+            # 根据奖励模式计算奖励
+            if self.reward_mode == 'original':
+                # 原始模式：奖励范围大
+                if isSelfDrawn:
+                    self.reward = [-(8 + fanCnt)] * 4
+                    self.reward[player] = (8 + fanCnt) * 3
+                else:
+                    self.reward = [-8] * 4
+                    self.reward[player] = 8 * 3 + fanCnt
+                    self.reward[self.curPlayer] -= fanCnt
+
+            elif self.reward_mode == 'simple':
+                # 简单模式：统一惩罚，赢家用sqrt压缩
+                if isSelfDrawn:
+                    self.reward = [-1] * 4
+                    self.reward[player] = math.sqrt((8 + fanCnt) * 3 / 2)
+                else:
+                    self.reward = [-1] * 4
+                    self.reward[player] = math.sqrt((8 * 3 + fanCnt) / 2)
+                    self.reward[self.curPlayer] = -2
+
+            elif self.reward_mode == 'sqrt':
+                # 折中模式：压缩但保留番数差异
+                if isSelfDrawn:
+                    base_penalty = -math.sqrt((8 + fanCnt) / 4)
+                    self.reward = [base_penalty] * 4
+                    self.reward[player] = math.sqrt((8 + fanCnt) * 3 / 2)
+                else:
+                    self.reward = [-1] * 4
+                    self.reward[player] = math.sqrt((8 * 3 + fanCnt) / 2)
+                    # 点炮者惩罚和番数相关，但压缩
+                    self.reward[self.curPlayer] = -math.sqrt((8 + fanCnt) / 4)
+
             self.done = True
         except Exception as e:
             raise Error(player)

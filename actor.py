@@ -26,6 +26,9 @@ class Actor(Process):
         self.replay_buffer = replay_buffer
         self.config = config
         self.name = config.get('name', 'Actor-?')
+        self.self_play_mode = config.get('self_play_mode', False)
+        # 自博弈模式下，预训练对手的概率（每局最多1个预训练）
+        self.pretrain_prob = config.get('pretrain_prob', 0.3)
 
     def _select_opponent_type(self, episode):
         """
@@ -111,7 +114,10 @@ class Actor(Process):
             opp.load_state_dict(state_dict)
 
         # collect data
-        env = MahjongGBEnv(config = {'agent_clz': FeatureAgentV2})
+        env = MahjongGBEnv(config={
+            'agent_clz': FeatureAgentV2,
+            'reward_mode': self.config.get('reward_mode', 'simple')
+        })
 
         for episode in range(self.config['episodes_per_actor']):
             # update main model to latest
@@ -122,66 +128,85 @@ class Actor(Process):
                     main_model.load_state_dict(state_dict)
                     version = latest
 
-            # 为每个对手随机选择类型和加载对应模型
-            for i, opp in enumerate(opponent_models):
-                opp_type = self._select_opponent_type(episode)
-                opponent_types[i] = opp_type
+            # ==================== 自博弈模式 ====================
+            if self.self_play_mode:
+                # 自博弈模式：4个玩家都用最新模型，最多1个用预训练
+                # 决定是否有一个预训练对手
+                has_pretrain = (random.random() < self.pretrain_prob) and (pretrain_model is not None)
+                pretrain_player_idx = random.randint(0, 3) if has_pretrain else -1
 
-                if opp_type == OPPONENT_LATEST:
-                    # 使用最新模型
-                    try:
-                        opp_state = model_pool.load_model(latest)
-                        if opp_state:
-                            opp.load_state_dict(opp_state)
-                    except Exception:
-                        pass  # SharedMemory可能已释放，保持原模型
-
-                elif opp_type == OPPONENT_PRETRAIN:
-                    # 使用预训练模型
-                    if pretrain_model is not None:
-                        opp.load_state_dict(pretrain_model.state_dict())
+                models = {}
+                player_types = {}
+                for i, agent_name in enumerate(env.agent_names):
+                    if i == pretrain_player_idx:
+                        models[agent_name] = pretrain_model
+                        player_types[agent_name] = OPPONENT_PRETRAIN
                     else:
-                        # 没有预训练模型，fallback到最新
-                        opponent_types[i] = OPPONENT_LATEST
+                        models[agent_name] = main_model
+                        player_types[agent_name] = OPPONENT_LATEST
+
+            # ==================== 原有模式 ====================
+            else:
+                # 为每个对手随机选择类型和加载对应模型
+                for i, opp in enumerate(opponent_models):
+                    opp_type = self._select_opponent_type(episode)
+                    opponent_types[i] = opp_type
+
+                    if opp_type == OPPONENT_LATEST:
+                        # 使用最新模型
                         try:
                             opp_state = model_pool.load_model(latest)
                             if opp_state:
                                 opp.load_state_dict(opp_state)
                         except Exception:
-                            pass
+                            pass  # SharedMemory可能已释放，保持原模型
 
-                elif opp_type == OPPONENT_CHECKPOINT:
-                    # 使用历史检查点
-                    if not self._load_checkpoint_model(opp):
-                        # 加载失败，fallback到最新
-                        opponent_types[i] = OPPONENT_LATEST
-                        try:
-                            opp_state = model_pool.load_model(latest)
-                            if opp_state:
-                                opp.load_state_dict(opp_state)
-                        except Exception:
-                            pass
+                    elif opp_type == OPPONENT_PRETRAIN:
+                        # 使用预训练模型
+                        if pretrain_model is not None:
+                            opp.load_state_dict(pretrain_model.state_dict())
+                        else:
+                            # 没有预训练模型，fallback到最新
+                            opponent_types[i] = OPPONENT_LATEST
+                            try:
+                                opp_state = model_pool.load_model(latest)
+                                if opp_state:
+                                    opp.load_state_dict(opp_state)
+                            except Exception:
+                                pass
 
-                elif opp_type == OPPONENT_RANDOM:
-                    # 随机策略不需要加载模型，在采样时处理
-                    pass
+                    elif opp_type == OPPONENT_CHECKPOINT:
+                        # 使用历史检查点
+                        if not self._load_checkpoint_model(opp):
+                            # 加载失败，fallback到最新
+                            opponent_types[i] = OPPONENT_LATEST
+                            try:
+                                opp_state = model_pool.load_model(latest)
+                                if opp_state:
+                                    opp.load_state_dict(opp_state)
+                            except Exception:
+                                pass
 
-            # randomly choose main player position (for diverse seat wind)
-            main_player_idx = random.randint(0, 3)
-            main_player_name = f'player_{main_player_idx + 1}'
+                    elif opp_type == OPPONENT_RANDOM:
+                        # 随机策略不需要加载模型，在采样时处理
+                        pass
 
-            # assign models and types: main player uses main_model, others use opponent_models
-            opp_idx = 0
-            models = {}
-            player_types = {}  # 记录每个玩家的对手类型
-            for i, agent_name in enumerate(env.agent_names):
-                if i == main_player_idx:
-                    models[agent_name] = main_model
-                    player_types[agent_name] = 'main'
-                else:
-                    models[agent_name] = opponent_models[opp_idx]
-                    player_types[agent_name] = opponent_types[opp_idx]
-                    opp_idx += 1
+                # randomly choose main player position (for diverse seat wind)
+                main_player_idx = random.randint(0, 3)
+                main_player_name = f'player_{main_player_idx + 1}'
+
+                # assign models and types: main player uses main_model, others use opponent_models
+                opp_idx = 0
+                models = {}
+                player_types = {}  # 记录每个玩家的对手类型
+                for i, agent_name in enumerate(env.agent_names):
+                    if i == main_player_idx:
+                        models[agent_name] = main_model
+                        player_types[agent_name] = 'main'
+                    else:
+                        models[agent_name] = opponent_models[opp_idx]
+                        player_types[agent_name] = opponent_types[opp_idx]
+                        opp_idx += 1
 
             # run one episode and collect data
             obs = env.reset()
@@ -237,39 +262,87 @@ class Actor(Process):
                 obs = next_obs
 
             # 打印对局信息
-            opp_type_str = ','.join([player_types[f'player_{i+1}'] for i in range(4) if i != main_player_idx])
-            print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Reward {rewards[main_player_name]:.1f}")
+            if self.self_play_mode:
+                pretrain_name = f'player_{pretrain_player_idx + 1}' if pretrain_player_idx >= 0 else 'None'
+                # 计算所有最新模型玩家的平均reward
+                latest_rewards = [rewards[name] for name, ptype in player_types.items() if ptype == OPPONENT_LATEST]
+                avg_reward = sum(latest_rewards) / len(latest_rewards) if latest_rewards else 0
+                print(f"{self.name} Ep {episode} Model {latest['id']} Pretrain [{pretrain_name}] AvgReward {avg_reward:.1f}")
+            else:
+                opp_type_str = ','.join([player_types[f'player_{i+1}'] for i in range(4) if player_types.get(f'player_{i+1}') != 'main'])
+                main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
+                print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Reward {rewards[main_player_name]:.1f}")
 
-            # postprocessing episode data - only for main player
-            agent_data = episode_data[main_player_name]
-            if len(agent_data['action']) < len(agent_data['reward']):
-                agent_data['reward'].pop(0)
-            obs_arr = np.stack(agent_data['state']['observation'])
-            mask = np.stack(agent_data['state']['action_mask'])
-            actions_arr = np.array(agent_data['action'], dtype=np.int64)
-            rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
-            values_arr = np.array(agent_data['value'], dtype=np.float32)
-            next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
+            # ==================== 数据采样 ====================
+            if self.self_play_mode:
+                # 自博弈模式：采样所有用最新模型的玩家的数据
+                for agent_name, agent_data in episode_data.items():
+                    # 跳过预训练对手的数据
+                    if player_types[agent_name] == OPPONENT_PRETRAIN:
+                        continue
 
-            td_target = rewards_arr + next_values * self.config['gamma']
-            td_delta = td_target - values_arr
-            advs = []
-            adv = 0
-            for delta in td_delta[::-1]:
-                adv = self.config['gamma'] * self.config['lambda'] * adv + delta
-                advs.append(adv)
-            advs.reverse()
-            advantages = np.array(advs, dtype=np.float32)
+                    if len(agent_data['action']) < len(agent_data['reward']):
+                        agent_data['reward'].pop(0)
 
-            # send samples to replay_buffer (only main player)
-            episode_reward = rewards[main_player_name]  # 本局最终reward
-            self.replay_buffer.push({
-                'state': {
-                    'observation': obs_arr,
-                    'action_mask': mask
-                },
-                'action': actions_arr,
-                'adv': advantages,
-                'target': td_target,
-                'episode_reward': episode_reward  # 用于统计
-            })
+                    obs_arr = np.stack(agent_data['state']['observation'])
+                    mask = np.stack(agent_data['state']['action_mask'])
+                    actions_arr = np.array(agent_data['action'], dtype=np.int64)
+                    rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
+                    values_arr = np.array(agent_data['value'], dtype=np.float32)
+                    next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
+
+                    td_target = rewards_arr + next_values * self.config['gamma']
+                    td_delta = td_target - values_arr
+                    advs = []
+                    adv = 0
+                    for delta in td_delta[::-1]:
+                        adv = self.config['gamma'] * self.config['lambda'] * adv + delta
+                        advs.append(adv)
+                    advs.reverse()
+                    advantages = np.array(advs, dtype=np.float32)
+
+                    episode_reward = rewards[agent_name]
+                    self.replay_buffer.push({
+                        'state': {
+                            'observation': obs_arr,
+                            'action_mask': mask
+                        },
+                        'action': actions_arr,
+                        'adv': advantages,
+                        'target': td_target,
+                        'episode_reward': episode_reward
+                    })
+            else:
+                # 原有模式：只采样主玩家
+                main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
+                agent_data = episode_data[main_player_name]
+                if len(agent_data['action']) < len(agent_data['reward']):
+                    agent_data['reward'].pop(0)
+                obs_arr = np.stack(agent_data['state']['observation'])
+                mask = np.stack(agent_data['state']['action_mask'])
+                actions_arr = np.array(agent_data['action'], dtype=np.int64)
+                rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
+                values_arr = np.array(agent_data['value'], dtype=np.float32)
+                next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
+
+                td_target = rewards_arr + next_values * self.config['gamma']
+                td_delta = td_target - values_arr
+                advs = []
+                adv = 0
+                for delta in td_delta[::-1]:
+                    adv = self.config['gamma'] * self.config['lambda'] * adv + delta
+                    advs.append(adv)
+                advs.reverse()
+                advantages = np.array(advs, dtype=np.float32)
+
+                episode_reward = rewards[main_player_name]
+                self.replay_buffer.push({
+                    'state': {
+                        'observation': obs_arr,
+                        'action_mask': mask
+                    },
+                    'action': actions_arr,
+                    'adv': advantages,
+                    'target': td_target,
+                    'episode_reward': episode_reward
+                })

@@ -11,6 +11,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='RL training for Mahjong')
     parser.add_argument('--pretrain', type=str, default=None, help='Path to pretrained model from supervised learning')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint directory to resume training')
+    parser.add_argument('--self-play', action='store_true', help='Enable self-play mode (collect data from all latest model players)')
+    parser.add_argument('--pretrain-prob', type=float, default=0.3, help='Probability of having one pretrain opponent per episode (only in self-play mode)')
+    parser.add_argument('--kl-init', type=float, default=0.02, help='Initial KL coefficient')
+    parser.add_argument('--kl-min', type=float, default=0.0, help='Minimum KL coefficient')
+    parser.add_argument('--kl-decay-steps', type=int, default=10000, help='Steps to decay KL coefficient')
+    parser.add_argument('--reward-mode', type=str, default='sqrt', choices=['simple', 'sqrt', 'original'],
+                        help='Reward mode: simple(统一惩罚), sqrt(压缩但保留差异), original(原始)')
     args = parser.parse_args()
 
     # 确定实验名称和检查点路径
@@ -43,7 +50,7 @@ if __name__ == '__main__':
         'model_pool_size': 50,            # 增大缓冲，避免历史模型被过快释放
         'model_pool_name': 'model-pool',
         'num_actors': 24,                 # 25核留1核给learner
-        'episodes_per_actor': 100000,    # 每个actor跑的局数（足够多，可手动停止）
+        'episodes_per_actor': 10000,    # 每个actor跑的局数（足够多，可手动停止）
 
         # === PPO 参数 ===
         'gamma': 0.99,                    # 折扣因子，稍微提高
@@ -59,7 +66,18 @@ if __name__ == '__main__':
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
         'entropy_coeff': 0.01,            # 熵正则系数（降低，减少随机探索）
-        'kl_coeff': 0.0,                  # 去掉KL约束，让模型自由探索
+
+        # === KL约束（动态衰减） ===
+        'kl_coeff_init': args.kl_init,    # 初始KL系数
+        'kl_coeff_min': args.kl_min,      # 最小KL系数
+        'kl_decay_steps': args.kl_decay_steps,  # 衰减步数
+
+        # === 自博弈模式 ===
+        'self_play_mode': getattr(args, 'self_play', False),  # 是否开启自博弈模式
+        'pretrain_prob': args.pretrain_prob,  # 每局有预训练对手的概率
+
+        # === 奖励模式 ===
+        'reward_mode': args.reward_mode,  # simple/sqrt/original
 
         # === 保存 ===
         'device': 'cuda',
@@ -73,7 +91,19 @@ if __name__ == '__main__':
     }
     
     replay_buffer = ReplayBuffer(config['replay_buffer_size'], config['replay_buffer_episode'])
-    
+
+    # 打印训练模式信息
+    print("=" * 50)
+    print("Training Configuration:")
+    print(f"  Self-play mode: {config['self_play_mode']}")
+    if config['self_play_mode']:
+        print(f"  Pretrain opponent probability: {config['pretrain_prob']}")
+    print(f"  Reward mode: {config['reward_mode']}")
+    print(f"  KL coefficient: {config['kl_coeff_init']} -> {config['kl_coeff_min']} over {config['kl_decay_steps']} steps")
+    print(f"  Pretrain model: {config['pretrain_path']}")
+    print(f"  Checkpoint path: {config['ckpt_save_path']}")
+    print("=" * 50)
+
     actors = []
     for i in range(config['num_actors']):
         config['name'] = 'Actor-%d' % i

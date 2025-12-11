@@ -160,21 +160,20 @@ class Learner(Process):
                 value_loss = torch.mean(F.mse_loss(values.squeeze(-1), targets))
                 entropy_loss = -torch.mean(action_dist.entropy())
 
-                # 动态调整 KL 约束和熵系数（课程学习）
-                # 用 episode_in 和 Actor 同步阶段
-                # 阶段1: 0-48万局 (24 actor × 2万局)
-                # 阶段2: 48万-144万局 (24 actor × 6万局)
-                # 阶段3: 144万+局
-                total_episodes = self.replay_buffer.stats['episode_in']
-                if total_episodes < 480000:
-                    kl_coeff = 0.1
-                    entropy_coeff = 0.02
-                elif total_episodes < 1440000:
-                    kl_coeff = 0.02
-                    entropy_coeff = 0.01
+                # 动态调整 KL 约束（平滑衰减）
+                # kl_coeff 从 kl_coeff_init 开始，经过 kl_decay_steps 步衰减到 kl_coeff_min
+                kl_coeff_init = self.config.get('kl_coeff_init', 0.02)  # 初始KL系数
+                kl_coeff_min = self.config.get('kl_coeff_min', 0.0)     # 最小KL系数
+                kl_decay_steps = self.config.get('kl_decay_steps', 10000)  # 衰减步数
+
+                if iterations < kl_decay_steps:
+                    # 线性衰减
+                    kl_coeff = kl_coeff_init - (kl_coeff_init - kl_coeff_min) * (iterations / kl_decay_steps)
                 else:
-                    kl_coeff = 0.0
-                    entropy_coeff = 0.005
+                    kl_coeff = kl_coeff_min
+
+                # 熵系数（可选：也可以动态调整）
+                entropy_coeff = self.config.get('entropy_coeff', 0.01)
 
                 # KL散度约束：限制策略不能偏离预训练太远
                 kl_loss = torch.tensor(0.0).to(device)
@@ -199,6 +198,7 @@ class Learner(Process):
 
             # log to tensorboard
             current_lr = optimizer.param_groups[0]['lr']
+            total_episodes = self.replay_buffer.stats['episode_in']
             writer.add_scalar('Loss/policy', policy_loss.item(), iterations)
             writer.add_scalar('Loss/value', value_loss.item(), iterations)
             writer.add_scalar('Loss/entropy', entropy_loss.item(), iterations)
