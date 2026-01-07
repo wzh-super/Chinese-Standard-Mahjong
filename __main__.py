@@ -35,26 +35,26 @@ class ResBlock(nn.Module):
 
 
 class CNNModel(nn.Module):
-    def __init__(self, num_res_blocks=8, channels=128, in_channels=147):
+    def __init__(self, num_res_blocks=16, channels=256, in_channels=147):
         super().__init__()
         self.input_conv = nn.Conv2d(in_channels, channels, 3, 1, 1, bias=False)
         self.input_bn = nn.BatchNorm2d(channels)
         self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_res_blocks)])
         self._logits = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(channels * 4 * 9, 512),
+            nn.Linear(channels * 4 * 9, 1024),
             nn.ReLU(True),
-            nn.Linear(512, 256),
+            nn.Linear(1024, 512),
             nn.ReLU(True),
-            nn.Linear(256, 235)
+            nn.Linear(512, 235)
         )
         self._value_branch = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(channels * 4 * 9, 512),
+            nn.Linear(channels * 4 * 9, 1024),
             nn.ReLU(True),
-            nn.Linear(512, 256),
+            nn.Linear(1024, 512),
             nn.ReLU(True),
-            nn.Linear(256, 1)
+            nn.Linear(512, 1)
         )
 
     def forward(self, input_dict):

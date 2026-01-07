@@ -26,17 +26,17 @@ class CNNModel(nn.Module):
     深度ResNet风格的Actor-Critic网络
 
     结构：
-    - 输入卷积: in_channels → 128 通道
-    - 8个残差块 (共16层卷积)
-    - 策略头: 128*4*9 → 512 → 235
-    - 价值头: 128*4*9 → 512 → 1
+    - 输入卷积: in_channels → 256 通道
+    - 16个残差块 (共32层卷积)
+    - 策略头: 256*4*9 → 1024 → 512 → 235
+    - 价值头: 256*4*9 → 1024 → 512 → 1
 
     输入通道数:
     - 旧版 (FeatureAgent): 6 通道
     - 新版 (FeatureAgentV2): 147 通道
     """
 
-    def __init__(self, num_res_blocks=8, channels=128, in_channels=147):
+    def __init__(self, num_res_blocks=16, channels=256, in_channels=147):
         super().__init__()
 
         self.num_res_blocks = num_res_blocks
@@ -55,21 +55,21 @@ class CNNModel(nn.Module):
         # 策略头
         self._logits = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(channels * 4 * 9, 512),
+            nn.Linear(channels * 4 * 9, 1024),
             nn.ReLU(True),
-            nn.Linear(512, 256),
+            nn.Linear(1024, 512),
             nn.ReLU(True),
-            nn.Linear(256, 235)
+            nn.Linear(512, 235)
         )
 
         # 价值头（用于非 CTDE 模式，或 actor 推理时的快速 value 估计）
         self._value_branch = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(channels * 4 * 9, 512),
+            nn.Linear(channels * 4 * 9, 1024),
             nn.ReLU(True),
-            nn.Linear(512, 256),
+            nn.Linear(1024, 512),
             nn.ReLU(True),
-            nn.Linear(256, 1)
+            nn.Linear(512, 1)
         )
 
         # 初始化权重
@@ -120,7 +120,7 @@ class CentralizedCritic(nn.Module):
     输出: 1 (价值估计)
     """
 
-    def __init__(self, num_res_blocks=8, channels=128, in_channels=159):
+    def __init__(self, num_res_blocks=16, channels=256, in_channels=159):
         super().__init__()
 
         self.num_res_blocks = num_res_blocks
@@ -139,11 +139,11 @@ class CentralizedCritic(nn.Module):
         # 价值头
         self._value_branch = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(channels * 4 * 9, 512),
+            nn.Linear(channels * 4 * 9, 1024),
             nn.ReLU(True),
-            nn.Linear(512, 256),
+            nn.Linear(1024, 512),
             nn.ReLU(True),
-            nn.Linear(256, 1)
+            nn.Linear(512, 1)
         )
 
         # 初始化权重
