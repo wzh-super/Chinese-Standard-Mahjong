@@ -1,5 +1,6 @@
 from multiprocessing import Queue
 from collections import deque
+from queue import Empty
 import numpy as np
 import random
 
@@ -9,18 +10,21 @@ class ReplayBuffer:
         self.queue = Queue(episode)
         self.capacity = capacity
         self.buffer = None
-    
+
     def push(self, samples): # only called by actors
         self.queue.put(samples)
-    
+
     def _flush(self):
         if self.buffer is None: # called first time by learner
             self.buffer = deque(maxlen = self.capacity)
             self.stats = {'sample_in': 0, 'sample_out': 0, 'episode_in': 0}
             self.reward_stats = {'sum': 0.0, 'count': 0, 'recent': deque(maxlen=1000)}
-        while not self.queue.empty():
-            # data flushed from queue to buffer
-            episode_data = self.queue.get()
+        # 用 get_nowait + Empty 异常，比 empty() 在多进程下更可靠
+        while True:
+            try:
+                episode_data = self.queue.get_nowait()
+            except Empty:
+                break
             # 提取并统计episode_reward
             if 'episode_reward' in episode_data:
                 ep_reward = episode_data.pop('episode_reward')
@@ -42,14 +46,32 @@ class ReplayBuffer:
             samples = random.sample(self.buffer, batch_size)
         batch = self._pack(samples)
         return batch
-    
+
+    def get_all(self): # only called by learner - 取出所有样本用于 on-policy PPO
+        self._flush()
+        assert len(self.buffer) > 0, "Empty buffer!"
+        samples = list(self.buffer)
+        self.stats['sample_out'] += len(samples)
+        batch = self._pack(samples)
+        return batch
+
+    def get_all_and_clear(self): # only called by learner - 原子操作：取出所有样本并清空
+        """原子操作：取出所有样本并清空 buffer，避免丢失期间 push 的数据"""
+        self._flush()
+        assert len(self.buffer) > 0, "Empty buffer!"
+        samples = list(self.buffer)
+        self.stats['sample_out'] += len(samples)
+        self.buffer.clear()  # 立即清空，不再调用 _flush
+        batch = self._pack(samples)
+        return batch
+
     def size(self): # only called by learner
         self._flush()
         return len(self.buffer)
-    
-    def clear(self): # only called by learner
-        self._flush()
-        self.buffer.clear()
+
+    def clear(self): # only called by learner - 只清空 buffer，不 flush 队列
+        if self.buffer is not None:
+            self.buffer.clear()
     
     def _unpack(self, data):
         # convert dict (of dict...) of list of (num/ndarray/list) to list of dict (of dict...)

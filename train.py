@@ -46,27 +46,29 @@ if __name__ == '__main__':
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
         # === 经验收集 ===
-        'replay_buffer_size': 200000,     # 90GB内存，可以存更多经验
-        'replay_buffer_episode': 1000,    # 队列容量
+        'replay_buffer_size': 50000,      # On-policy: 每轮清空，不需要太大
+        'replay_buffer_episode': 500,     # 队列容量
         'model_pool_size': 50,            # 增大缓冲，避免历史模型被过快释放
         'model_pool_name': 'model-pool',
         'num_actors': 24,                 # 25核留1核给learner
         'episodes_per_actor': 10000,    # 每个actor跑的局数（足够多，可手动停止）
 
-        # === PPO 参数 ===
-        'gamma': 0.99,                    # 折扣因子，稍微提高
+        # === PPO 参数（On-Policy）===
+        'samples_per_update': 20000,      # 每轮收集的样本数（约 200-400 局）
+        'max_staleness': 3,               # 最大允许的策略版本差（过滤太旧的样本）
+        'gamma': 0.99,                    # 折扣因子
         'lambda': 0.95,                   # GAE参数
-        'min_sample': 5000,               # 开始训练前的最小样本数（提高初始多样性）
-        'value_warmup_steps': 2000,       # Value预热步数（冻结Policy，只训练Value）
-        'batch_size': 1024,               # 4090可以开大batch
+        'min_sample': 5000,               # 开始训练前的最小样本数
+        'value_warmup_steps': 2000,       # Value预热步数
+        'batch_size': 1024,               # mini-batch 大小
         'epochs': 5,                      # 每批数据的PPO迭代次数
-        'clip': 0.15,                     # PPO裁剪范围（稍降低）
-        'lr': 5e-5,                       # 学习率（适中）
+        'clip': 0.15,                     # PPO裁剪范围
+        'lr': 5e-5,                       # 学习率
         'lr_min': 1e-5,                   # 学习率下限
         'lr_decay_steps': 5000,           # 每隔多少步衰减
         'lr_decay_rate': 0.8,             # 衰减系数
         'value_coeff': 0.5,               # 价值损失系数
-        'entropy_coeff': 0.01,            # 熵正则系数（降低，减少随机探索）
+        'entropy_coeff': 0.01,            # 熵正则系数
 
         # === KL约束（动态衰减） ===
         'kl_coeff_init': args.kl_init,    # 初始KL系数

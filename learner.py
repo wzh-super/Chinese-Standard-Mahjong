@@ -70,6 +70,7 @@ class Learner(Process):
 
         # send to model pool
         model_pool.push(model.state_dict()) # push cpu-only tensor to model_pool
+        current_policy_id = 0  # 初始模型版本
         model = model.to(device)
         
         # training
@@ -127,9 +128,44 @@ class Learner(Process):
 
         cur_time = time.time()
         iterations = 0
+        samples_per_update = self.config.get('samples_per_update', 10000)  # 每轮收集的样本数
+        max_staleness = self.config.get('max_staleness', 3)  # 最大允许的策略版本差
+
         while True:
-            # sample batch
-            batch = self.replay_buffer.sample(self.config['batch_size'])
+            # ==================== On-Policy PPO: 等待收集足够样本 ====================
+            while self.replay_buffer.size() < samples_per_update:
+                time.sleep(0.1)
+
+            # 原子操作：取出所有样本并清空 buffer，避免丢失期间 push 的数据
+            batch = self.replay_buffer.get_all_and_clear()
+
+            # ==================== Policy ID 过滤：丢弃太旧的样本 ====================
+            policy_ids = batch['policy_id']
+            fresh_mask = policy_ids >= (current_policy_id - max_staleness)
+            n_fresh = fresh_mask.sum()
+            n_stale = len(policy_ids) - n_fresh
+
+            if n_fresh == 0:
+                print(f'Warning: All {len(policy_ids)} samples are stale (policy_id < {current_policy_id - max_staleness}), skipping iteration')
+                continue
+
+            if n_stale > 0:
+                print(f'Filtered out {n_stale} stale samples (policy_id < {current_policy_id - max_staleness})')
+                # 过滤所有数据
+                batch = {
+                    'state': {
+                        'observation': batch['state']['observation'][fresh_mask],
+                        'action_mask': batch['state']['action_mask'][fresh_mask]
+                    },
+                    'action': batch['action'][fresh_mask],
+                    'log_prob': batch['log_prob'][fresh_mask],
+                    'adv': batch['adv'][fresh_mask],
+                    'target': batch['target'][fresh_mask],
+                    'policy_id': batch['policy_id'][fresh_mask]
+                }
+
+            total_samples = len(batch['action'])
+
             obs = torch.tensor(batch['state']['observation']).to(device)
             mask = torch.tensor(batch['state']['action_mask']).to(device)
             states = {
@@ -137,63 +173,80 @@ class Learner(Process):
                 'action_mask': mask
             }
             actions = torch.tensor(batch['action']).unsqueeze(-1).to(device)
+            # 直接使用 actor 存储的 log_prob，这是真正的行为策略 log_prob
+            old_log_probs = torch.tensor(batch['log_prob']).unsqueeze(-1).to(device)
             advs = torch.tensor(batch['adv']).to(device)
-            advs = (advs - advs.mean()) / (advs.std() + 1e-8)  # Advantage归一化，稳定训练
+            advs = (advs - advs.mean()) / (advs.std() + 1e-8)  # Advantage归一化
             targets = torch.tensor(batch['target']).to(device)
-            
-            print('Iteration %d, replay buffer in %d out %d' % (iterations, self.replay_buffer.stats['sample_in'], self.replay_buffer.stats['sample_out']))
-            
-            # calculate PPO loss
-            model.train(True) # Batch Norm training mode
-            old_logits, _ = model(states)
-            old_probs = F.softmax(old_logits, dim = 1).gather(1, actions)
-            old_log_probs = torch.log(old_probs + 1e-8).detach()
-            for _ in range(self.config['epochs']):
-                logits, values = model(states)
-                action_dist = torch.distributions.Categorical(logits = logits)
-                probs = F.softmax(logits, dim = 1).gather(1, actions)
-                log_probs = torch.log(probs + 1e-8)
-                ratio = torch.exp(log_probs - old_log_probs)
-                surr1 = ratio * advs
-                surr2 = torch.clamp(ratio, 1 - self.config['clip'], 1 + self.config['clip']) * advs
-                policy_loss = -torch.mean(torch.min(surr1, surr2))
-                value_loss = torch.mean(F.mse_loss(values.squeeze(-1), targets))
-                entropy_loss = -torch.mean(action_dist.entropy())
 
-                # 动态调整 KL 约束（平滑衰减）
-                # kl_coeff 从 kl_coeff_init 开始，经过 kl_decay_steps 步衰减到 kl_coeff_min
-                kl_coeff_init = self.config.get('kl_coeff_init', 0.02)  # 初始KL系数
-                kl_coeff_min = self.config.get('kl_coeff_min', 0.0)     # 最小KL系数
-                kl_decay_steps = self.config.get('kl_decay_steps', 10000)  # 衰减步数
+            print('Iteration %d, samples collected %d, total episodes %d' % (
+                iterations, total_samples, self.replay_buffer.stats['episode_in']))
 
-                if iterations < kl_decay_steps:
-                    # 线性衰减
-                    kl_coeff = kl_coeff_init - (kl_coeff_init - kl_coeff_min) * (iterations / kl_decay_steps)
-                else:
-                    kl_coeff = kl_coeff_min
+            # ==================== PPO 训练：多个 epoch，每个 epoch 遍历所有 mini-batch ====================
+            batch_size = self.config['batch_size']
+            indices = np.arange(total_samples)
 
-                # 熵系数（可选：也可以动态调整）
-                entropy_coeff = self.config.get('entropy_coeff', 0.01)
+            for epoch in range(self.config['epochs']):
+                np.random.shuffle(indices)  # 每个 epoch 打乱顺序
 
-                # KL散度约束：限制策略不能偏离预训练太远
-                kl_loss = torch.tensor(0.0).to(device)
-                if pretrain_model is not None and kl_coeff > 0:
-                    with torch.no_grad():
-                        pretrain_logits, _ = pretrain_model(states)
-                    pretrain_probs = F.softmax(pretrain_logits, dim=1)
-                    current_probs = F.softmax(logits, dim=1)
-                    # KL(pretrain || current)
-                    kl_loss = torch.mean(torch.sum(pretrain_probs * (torch.log(pretrain_probs + 1e-8) - torch.log(current_probs + 1e-8)), dim=1))
+                for start in range(0, total_samples, batch_size):
+                    end = min(start + batch_size, total_samples)
+                    mb_indices = indices[start:end]
 
-                loss = policy_loss + self.config['value_coeff'] * value_loss + entropy_coeff * entropy_loss + kl_coeff * kl_loss
-                optimizer.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)  # 梯度裁剪，防止梯度爆炸
-                optimizer.step()
+                    mb_states = {
+                        'observation': obs[mb_indices],
+                        'action_mask': mask[mb_indices]
+                    }
+                    mb_actions = actions[mb_indices]
+                    mb_advs = advs[mb_indices]
+                    mb_targets = targets[mb_indices]
+                    mb_old_log_probs = old_log_probs[mb_indices]
 
-            # push new model
+                    model.train(True)
+                    logits, values = model(mb_states)
+                    action_dist = torch.distributions.Categorical(logits=logits)
+                    probs = F.softmax(logits, dim=1).gather(1, mb_actions)
+                    log_probs = torch.log(probs + 1e-8)
+
+                    # PPO ratio 使用真正的 old_log_probs（actor 采样时的策略）
+                    ratio = torch.exp(log_probs - mb_old_log_probs)
+                    surr1 = ratio * mb_advs.unsqueeze(-1)
+                    surr2 = torch.clamp(ratio, 1 - self.config['clip'], 1 + self.config['clip']) * mb_advs.unsqueeze(-1)
+                    policy_loss = -torch.mean(torch.min(surr1, surr2))
+                    value_loss = torch.mean(F.mse_loss(values.squeeze(-1), mb_targets))
+                    entropy_loss = -torch.mean(action_dist.entropy())
+
+                    # 动态调整 KL 约束
+                    kl_coeff_init = self.config.get('kl_coeff_init', 0.02)
+                    kl_coeff_min = self.config.get('kl_coeff_min', 0.0)
+                    kl_decay_steps = self.config.get('kl_decay_steps', 10000)
+
+                    if iterations < kl_decay_steps:
+                        kl_coeff = kl_coeff_init - (kl_coeff_init - kl_coeff_min) * (iterations / kl_decay_steps)
+                    else:
+                        kl_coeff = kl_coeff_min
+
+                    entropy_coeff = self.config.get('entropy_coeff', 0.01)
+
+                    # KL散度约束
+                    kl_loss = torch.tensor(0.0).to(device)
+                    if pretrain_model is not None and kl_coeff > 0:
+                        with torch.no_grad():
+                            pretrain_logits, _ = pretrain_model(mb_states)
+                        pretrain_probs = F.softmax(pretrain_logits, dim=1)
+                        current_probs = F.softmax(logits, dim=1)
+                        kl_loss = torch.mean(torch.sum(pretrain_probs * (torch.log(pretrain_probs + 1e-8) - torch.log(current_probs + 1e-8)), dim=1))
+
+                    loss = policy_loss + self.config['value_coeff'] * value_loss + entropy_coeff * entropy_loss + kl_coeff * kl_loss
+                    optimizer.zero_grad()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
+                    optimizer.step()
+
+            # push new model（每轮更新完 push 一次）
             model = model.to('cpu')
-            model_pool.push(model.state_dict()) # push cpu-only tensor to model_pool
+            model_pool.push(model.state_dict())
+            current_policy_id += 1  # 更新当前策略版本
             model = model.to(device)
 
             # log to tensorboard
@@ -207,7 +260,7 @@ class Learner(Process):
             writer.add_scalar('Stats/advantage_mean', advs.mean().item(), iterations)
             writer.add_scalar('Stats/advantage_std', advs.std().item(), iterations)
             writer.add_scalar('Stats/value_mean', values.mean().item(), iterations)
-            writer.add_scalar('Stats/buffer_size', self.replay_buffer.stats['sample_in'], iterations)
+            writer.add_scalar('Stats/samples_per_update', total_samples, iterations)
             writer.add_scalar('Stats/learning_rate', current_lr, iterations)
             writer.add_scalar('Params/kl_coeff', kl_coeff, iterations)
             writer.add_scalar('Params/entropy_coeff', entropy_coeff, iterations)
@@ -220,7 +273,7 @@ class Learner(Process):
                     recent_avg = sum(self.replay_buffer.reward_stats['recent']) / len(self.replay_buffer.reward_stats['recent'])
                     writer.add_scalar('Stats/episode_reward_recent', recent_avg, iterations)
 
-            # 学习率衰减（带下限）
+            # 学习率衰减
             if (iterations + 1) % lr_decay_steps == 0 and current_lr > lr_min:
                 new_lr = max(current_lr * lr_decay_rate, lr_min)
                 for param_group in optimizer.param_groups:

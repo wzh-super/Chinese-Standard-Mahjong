@@ -217,7 +217,8 @@ class Actor(Process):
                 },
                 'action' : [],
                 'reward' : [],
-                'value' : []
+                'value' : [],
+                'log_prob': []  # 存储采样时的 log_prob，用于严格 on-policy PPO
             } for agent_name in env.agent_names}
             done = False
             while not done:
@@ -236,6 +237,7 @@ class Actor(Process):
                         valid_actions = np.where(state['action_mask'] > 0)[0]
                         action = np.random.choice(valid_actions)
                         value = 0.0  # 随机策略没有value估计
+                        log_prob = 0.0  # 随机策略的 log_prob 不重要（不会被采样）
                     else:
                         # 使用模型采样
                         state_tensor = {
@@ -247,13 +249,17 @@ class Actor(Process):
                         with torch.no_grad():
                             logits, value_tensor = current_model(state_tensor)
                             action_dist = torch.distributions.Categorical(logits=logits)
-                            action = action_dist.sample().item()
+                            # 使用同一个采样 tensor，避免重新创建导致的 shape/device 问题
+                            sampled_action = action_dist.sample()
+                            action = sampled_action.item()
+                            log_prob = action_dist.log_prob(sampled_action).item()
                             value = value_tensor.item()
 
                     actions[agent_name] = action
                     values[agent_name] = value
                     agent_data['action'].append(action)
                     agent_data['value'].append(value)
+                    agent_data['log_prob'].append(log_prob)
                     # 同时记录 reward 占位，保证 action 和 reward 一一对应
                     agent_data['reward'].append(0)
 
@@ -280,6 +286,9 @@ class Actor(Process):
                 print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Rewards [{', '.join(reward_strs)}]")
 
             # ==================== 数据采样 ====================
+            # 记录当前使用的模型版本（用于 staleness 过滤）
+            current_policy_id = version['id']
+
             if self.self_play_mode:
                 # 自博弈模式：采样所有用最新模型的玩家的数据
                 for agent_name, agent_data in episode_data.items():
@@ -292,6 +301,7 @@ class Actor(Process):
                     actions_arr = np.array(agent_data['action'], dtype=np.int64)
                     rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
                     values_arr = np.array(agent_data['value'], dtype=np.float32)
+                    log_probs_arr = np.array(agent_data['log_prob'], dtype=np.float32)
                     next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
 
                     td_target = rewards_arr + next_values * self.config['gamma']
@@ -305,14 +315,17 @@ class Actor(Process):
                     advantages = np.array(advs, dtype=np.float32)
 
                     episode_reward = rewards[agent_name]
+                    n_samples = len(actions_arr)
                     self.replay_buffer.push({
                         'state': {
                             'observation': obs_arr,
                             'action_mask': mask
                         },
                         'action': actions_arr,
+                        'log_prob': log_probs_arr,
                         'adv': advantages,
                         'target': td_target,
+                        'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),  # 模型版本
                         'episode_reward': episode_reward
                     })
             else:
@@ -324,6 +337,7 @@ class Actor(Process):
                 actions_arr = np.array(agent_data['action'], dtype=np.int64)
                 rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
                 values_arr = np.array(agent_data['value'], dtype=np.float32)
+                log_probs_arr = np.array(agent_data['log_prob'], dtype=np.float32)
                 next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
 
                 td_target = rewards_arr + next_values * self.config['gamma']
@@ -337,13 +351,16 @@ class Actor(Process):
                 advantages = np.array(advs, dtype=np.float32)
 
                 episode_reward = rewards[main_player_name]
+                n_samples = len(actions_arr)
                 self.replay_buffer.push({
                     'state': {
                         'observation': obs_arr,
                         'action_mask': mask
                     },
                     'action': actions_arr,
+                    'log_prob': log_probs_arr,
                     'adv': advantages,
                     'target': td_target,
+                    'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),  # 模型版本
                     'episode_reward': episode_reward
                 })
