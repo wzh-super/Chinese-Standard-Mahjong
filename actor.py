@@ -254,12 +254,17 @@ class Actor(Process):
                     values[agent_name] = value
                     agent_data['action'].append(action)
                     agent_data['value'].append(value)
+                    # 同时记录 reward 占位，保证 action 和 reward 一一对应
+                    agent_data['reward'].append(0)
 
                 # interact with env
                 next_obs, rewards, done = env.step(actions)
-                for agent_name in rewards:
-                    episode_data[agent_name]['reward'].append(rewards[agent_name])
                 obs = next_obs
+
+            # 游戏结束后，把终局奖励写到每个玩家最后一次动作对应的 reward
+            for agent_name in env.agent_names:
+                if episode_data[agent_name]['reward']:
+                    episode_data[agent_name]['reward'][-1] = rewards[agent_name]
 
             # 打印对局信息
             if self.self_play_mode:
@@ -281,9 +286,6 @@ class Actor(Process):
                     # 跳过预训练对手的数据
                     if player_types[agent_name] == OPPONENT_PRETRAIN:
                         continue
-
-                    if len(agent_data['action']) < len(agent_data['reward']):
-                        agent_data['reward'].pop(0)
 
                     obs_arr = np.stack(agent_data['state']['observation'])
                     mask = np.stack(agent_data['state']['action_mask'])
@@ -317,8 +319,6 @@ class Actor(Process):
                 # 原有模式：只采样主玩家
                 main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
                 agent_data = episode_data[main_player_name]
-                if len(agent_data['action']) < len(agent_data['reward']):
-                    agent_data['reward'].pop(0)
                 obs_arr = np.stack(agent_data['state']['observation'])
                 mask = np.stack(agent_data['state']['action_mask'])
                 actions_arr = np.array(agent_data['action'], dtype=np.int64)
