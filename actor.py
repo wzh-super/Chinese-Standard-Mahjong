@@ -26,6 +26,11 @@ class Actor(Process):
         self.replay_buffer = replay_buffer
         self.config = config
         self.name = config.get('name', 'Actor-?')
+        # 从 name 中提取 actor index（如 'Actor-5' -> 5），用于生成唯一 traj_id
+        try:
+            self.actor_id = int(self.name.split('-')[1])
+        except (IndexError, ValueError):
+            self.actor_id = 0
         self.self_play_mode = config.get('self_play_mode', False)
         # 自博弈模式下，预训练对手的概率（每局最多1个预训练）
         self.pretrain_prob = config.get('pretrain_prob', 0.3)
@@ -69,8 +74,8 @@ class Actor(Process):
         """从本次运行的检查点目录随机加载一个模型"""
         ckpt_path = self.config.get('ckpt_save_path', './checkpoint/')
 
-        # 扫描本次运行的检查点文件
-        pattern = os.path.join(ckpt_path, '*.pt')
+        # 扫描本次运行的检查点文件（只匹配 model_*.pt，排除 critic_*.pt）
+        pattern = os.path.join(ckpt_path, 'model_*.pt')
         ckpt_files = glob.glob(pattern)
 
         if not ckpt_files:
@@ -213,16 +218,20 @@ class Actor(Process):
             episode_data = {agent_name: {
                 'state' : {
                     'observation': [],
-                    'action_mask': []
+                    'action_mask': [],
+                    'other_hands': []  # CTDE: 其他玩家手牌（12×4×9），在 learner 拼接
                 },
                 'action' : [],
-                'reward' : [],
-                'value' : [],
+                'reward' : [],  # 即时奖励，过程为0，终局写到最后
+                'done': [],     # 是否终止，最后一步为True
                 'log_prob': []  # 存储采样时的 log_prob，用于严格 on-policy PPO
             } for agent_name in env.agent_names}
             auto_pass_counts = {agent_name: 0 for agent_name in env.agent_names}  # debug统计
             done = False
             while not done:
+                # 获取全局手牌信息（用于 CTDE）
+                all_hands = env.get_global_hands()
+
                 # each player take action
                 actions = {}
                 for agent_name in obs:
@@ -238,19 +247,25 @@ class Actor(Process):
 
                     # ========== 正常采样流程 ==========
                     agent_data = episode_data[agent_name]
-                    # 记录 state
+
+                    # 获取对应的 FeatureAgentV2 实例，构造其他玩家手牌特征
+                    player_idx = int(agent_name.split('_')[1]) - 1
+                    feature_agent = env.agents[player_idx]
+                    other_hands = feature_agent.build_other_hands_obs(all_hands)
+
+                    # 记录 state（包括其他玩家手牌）
                     agent_data['state']['observation'].append(state['observation'])
                     agent_data['state']['action_mask'].append(state['action_mask'])
+                    agent_data['state']['other_hands'].append(other_hands)
 
                     # 根据玩家类型选择动作
                     if player_types[agent_name] == OPPONENT_RANDOM:
                         # 随机策略：从合法动作中随机选
                         valid_actions = np.where(action_mask > 0)[0]
                         action = np.random.choice(valid_actions)
-                        value = 0.0  # 随机策略没有value估计
                         log_prob = 0.0  # 随机策略的 log_prob 不重要（不会被采样）
                     else:
-                        # 使用模型采样
+                        # 使用模型采样（只需要 policy，不需要 value）
                         state_tensor = {
                             'observation': torch.tensor(state['observation'], dtype=torch.float).unsqueeze(0),
                             'action_mask': torch.tensor(state['action_mask'], dtype=torch.float).unsqueeze(0)
@@ -258,29 +273,27 @@ class Actor(Process):
                         current_model = models[agent_name]
                         current_model.train(False)
                         with torch.no_grad():
-                            logits, value_tensor = current_model(state_tensor)
+                            logits, _ = current_model(state_tensor)  # 不再使用 value
                             action_dist = torch.distributions.Categorical(logits=logits)
-                            # 使用同一个采样 tensor，避免重新创建导致的 shape/device 问题
                             sampled_action = action_dist.sample()
                             action = sampled_action.item()
                             log_prob = action_dist.log_prob(sampled_action).item()
-                            value = value_tensor.item()
 
                     actions[agent_name] = action
                     agent_data['action'].append(action)
-                    agent_data['value'].append(value)
                     agent_data['log_prob'].append(log_prob)
-                    # 同时记录 reward 占位，保证 action 和 reward 一一对应
-                    agent_data['reward'].append(0)
+                    agent_data['reward'].append(0)  # 过程奖励为0
+                    agent_data['done'].append(False)  # 非终止步
 
                 # interact with env
                 next_obs, rewards, done = env.step(actions)
                 obs = next_obs
 
-            # 游戏结束后，把终局奖励写到每个玩家最后一次动作对应的 reward
+            # 游戏结束后，更新每个玩家最后一步的 reward 和 done
             for agent_name in env.agent_names:
                 if episode_data[agent_name]['reward']:
                     episode_data[agent_name]['reward'][-1] = rewards[agent_name]
+                    episode_data[agent_name]['done'][-1] = True  # 最后一步标记为终止
 
             # 打印对局信息
             total_auto_pass = sum(auto_pass_counts.values())
@@ -297,12 +310,17 @@ class Actor(Process):
                 print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Rewards [{', '.join(reward_strs)}] AutoPass {total_auto_pass}")
 
             # ==================== 数据采样 ====================
-            # 记录当前使用的模型版本（用于 staleness 过滤）
+            # CTDE: Actor 只存原始数据，不算 adv/target
+            # adv/target 由 Learner 用 Centralized Critic 计算
             current_policy_id = version['id']
+
+            # 生成唯一轨迹ID：actor_id(8bit) + episode(20bit) + player_idx(4bit)
+            # 支持 256 个 actor，100万局，4 个玩家
+            # traj_id 格式: [actor_id:8][episode:20][player_idx:4] = 32bit
 
             if self.self_play_mode:
                 # 自博弈模式：采样所有用最新模型的玩家的数据
-                for agent_name, agent_data in episode_data.items():
+                for player_idx, (agent_name, agent_data) in enumerate(episode_data.items()):
                     # 跳过预训练对手的数据
                     if player_types[agent_name] == OPPONENT_PRETRAIN:
                         continue
@@ -310,75 +328,72 @@ class Actor(Process):
                     if len(agent_data['action']) == 0:
                         continue
 
+                    n_samples = len(agent_data['action'])
                     obs_arr = np.stack(agent_data['state']['observation'])
                     mask = np.stack(agent_data['state']['action_mask'])
+                    other_hands_arr = np.stack(agent_data['state']['other_hands'])  # CTDE: 12×4×9
                     actions_arr = np.array(agent_data['action'], dtype=np.int64)
                     rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
-                    values_arr = np.array(agent_data['value'], dtype=np.float32)
+                    dones_arr = np.array(agent_data['done'], dtype=np.bool_)
                     log_probs_arr = np.array(agent_data['log_prob'], dtype=np.float32)
-                    next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
 
-                    td_target = rewards_arr + next_values * self.config['gamma']
-                    td_delta = td_target - values_arr
-                    advs = []
-                    adv = 0
-                    for delta in td_delta[::-1]:
-                        adv = self.config['gamma'] * self.config['lambda'] * adv + delta
-                        advs.append(adv)
-                    advs.reverse()
-                    advantages = np.array(advs, dtype=np.float32)
+                    # 轨迹标识：用于 Learner 重建轨迹计算 GAE
+                    # traj_id = actor_id(8bit) + episode(20bit) + player_idx(4bit)
+                    traj_id = (self.actor_id << 24) | ((episode & 0xFFFFF) << 4) | player_idx
+                    t_arr = np.arange(n_samples, dtype=np.int32)
 
                     episode_reward = rewards[agent_name]
-                    n_samples = len(actions_arr)
                     self.replay_buffer.push({
                         'state': {
                             'observation': obs_arr,
-                            'action_mask': mask
+                            'action_mask': mask,
+                            'other_hands': other_hands_arr  # CTDE: 12×4×9
                         },
                         'action': actions_arr,
                         'log_prob': log_probs_arr,
-                        'adv': advantages,
-                        'target': td_target,
-                        'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),  # 模型版本
+                        'reward': rewards_arr,      # 原始奖励，Learner 算 GAE
+                        'done': dones_arr,          # 终止标记
+                        'traj_id': np.full(n_samples, traj_id, dtype=np.int64),  # 轨迹ID
+                        't': t_arr,                 # 时间步
+                        'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),
                         'episode_reward': episode_reward
                     })
             else:
                 # 原有模式：只采样主玩家
                 main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
+                main_player_idx = int(main_player_name.split('_')[1]) - 1
                 agent_data = episode_data[main_player_name]
                 # 跳过空数据（所有动作都是自动过牌）
                 if len(agent_data['action']) == 0:
                     continue
 
+                n_samples = len(agent_data['action'])
                 obs_arr = np.stack(agent_data['state']['observation'])
                 mask = np.stack(agent_data['state']['action_mask'])
+                other_hands_arr = np.stack(agent_data['state']['other_hands'])  # CTDE: 12×4×9
                 actions_arr = np.array(agent_data['action'], dtype=np.int64)
                 rewards_arr = np.array(agent_data['reward'], dtype=np.float32)
-                values_arr = np.array(agent_data['value'], dtype=np.float32)
+                dones_arr = np.array(agent_data['done'], dtype=np.bool_)
                 log_probs_arr = np.array(agent_data['log_prob'], dtype=np.float32)
-                next_values = np.array(agent_data['value'][1:] + [0], dtype=np.float32)
 
-                td_target = rewards_arr + next_values * self.config['gamma']
-                td_delta = td_target - values_arr
-                advs = []
-                adv = 0
-                for delta in td_delta[::-1]:
-                    adv = self.config['gamma'] * self.config['lambda'] * adv + delta
-                    advs.append(adv)
-                advs.reverse()
-                advantages = np.array(advs, dtype=np.float32)
+                # 轨迹标识
+                # traj_id = actor_id(8bit) + episode(20bit) + player_idx(4bit)
+                traj_id = (self.actor_id << 24) | ((episode & 0xFFFFF) << 4) | main_player_idx
+                t_arr = np.arange(n_samples, dtype=np.int32)
 
                 episode_reward = rewards[main_player_name]
-                n_samples = len(actions_arr)
                 self.replay_buffer.push({
                     'state': {
                         'observation': obs_arr,
-                        'action_mask': mask
+                        'action_mask': mask,
+                        'other_hands': other_hands_arr  # CTDE: 12×4×9
                     },
                     'action': actions_arr,
                     'log_prob': log_probs_arr,
-                    'adv': advantages,
-                    'target': td_target,
-                    'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),  # 模型版本
+                    'reward': rewards_arr,      # 原始奖励，Learner 算 GAE
+                    'done': dones_arr,          # 终止标记
+                    'traj_id': np.full(n_samples, traj_id, dtype=np.int64),  # 轨迹ID
+                    't': t_arr,                 # 时间步
+                    'policy_id': np.full(n_samples, current_policy_id, dtype=np.int64),
                     'episode_reward': episode_reward
                 })

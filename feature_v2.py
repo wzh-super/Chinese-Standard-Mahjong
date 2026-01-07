@@ -42,13 +42,19 @@ class FeatureAgentV2(MahjongGBAgent):
 
     observation: 147 × 4 × 9
     action_mask: 235
+
+    全局观测 (用于 CTDE Critic): 159 × 4 × 9
+    - 147 channels: 原有观测
+    - 12 channels: 其他3个玩家的手牌 (每人4 channels)
     """
 
     OBS_SIZE = 147
+    GLOBAL_OBS_SIZE = 159  # 147 + 12 (其他3人手牌)
     ACT_SIZE = 235
 
     # 用于环境接口
     observation_space = (OBS_SIZE, 4, 9)
+    global_observation_space = (GLOBAL_OBS_SIZE, 4, 9)
     action_space = ACT_SIZE
 
     # 观测通道偏移
@@ -546,3 +552,77 @@ class FeatureAgentV2(MahjongGBAgent):
         except:
             return False
         return True
+
+    def build_global_obs(self, all_hands):
+        """构建全局观测（用于 CTDE Critic）
+
+        Args:
+            all_hands: dict {player_id: list of tiles}，所有玩家的手牌
+                       player_id 是绝对编号 (0-3)
+
+        Returns:
+            global_obs: numpy array of shape (159, 4, 9)
+                - [0-146]: 原有观测
+                - [147-150]: 下家手牌 (4 channels)
+                - [151-154]: 对家手牌 (4 channels)
+                - [155-158]: 上家手牌 (4 channels)
+        """
+        # 创建全局观测，先复制原有观测
+        global_obs = np.zeros((self.GLOBAL_OBS_SIZE, 36), dtype=np.float32)
+        global_obs[:self.OBS_SIZE, :] = self.obs
+
+        # 添加其他3个玩家的手牌
+        # 相对编号：1=下家, 2=对家, 3=上家
+        for rel_player in range(1, 4):
+            abs_player = (self.seatWind + rel_player) % 4
+            hand = all_hands.get(abs_player, [])
+
+            # 统计手牌
+            tile_count = defaultdict(int)
+            for tile in hand:
+                tile_count[tile] += 1
+
+            # 填充特征 (4 channels per player)
+            base = self.OBS_SIZE + (rel_player - 1) * 4  # 147, 151, 155
+            for tile, count in tile_count.items():
+                idx = self.OFFSET_TILE[tile]
+                for i in range(count):
+                    global_obs[base + i, idx] = 1
+
+        return global_obs.reshape((self.GLOBAL_OBS_SIZE, 4, 9))
+
+    def build_other_hands_obs(self, all_hands):
+        """构建其他玩家手牌特征（用于 CTDE，减少存储）
+
+        Args:
+            all_hands: dict {player_id: list of tiles}，所有玩家的手牌
+                       player_id 是绝对编号 (0-3)
+
+        Returns:
+            other_hands_obs: numpy array of shape (12, 4, 9)
+                - [0-3]: 下家手牌 (4 channels)
+                - [4-7]: 对家手牌 (4 channels)
+                - [8-11]: 上家手牌 (4 channels)
+        """
+        OTHER_HANDS_SIZE = 12  # 3 players × 4 channels
+        other_hands_obs = np.zeros((OTHER_HANDS_SIZE, 36), dtype=np.float32)
+
+        # 添加其他3个玩家的手牌
+        # 相对编号：1=下家, 2=对家, 3=上家
+        for rel_player in range(1, 4):
+            abs_player = (self.seatWind + rel_player) % 4
+            hand = all_hands.get(abs_player, [])
+
+            # 统计手牌
+            tile_count = defaultdict(int)
+            for tile in hand:
+                tile_count[tile] += 1
+
+            # 填充特征 (4 channels per player)
+            base = (rel_player - 1) * 4  # 0, 4, 8
+            for tile, count in tile_count.items():
+                idx = self.OFFSET_TILE[tile]
+                for i in range(count):
+                    other_hands_obs[base + i, idx] = 1
+
+        return other_hands_obs.reshape((OTHER_HANDS_SIZE, 4, 9))

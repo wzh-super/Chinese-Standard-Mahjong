@@ -27,15 +27,15 @@ if __name__ == '__main__':
         ckpt_save_path = args.resume.rstrip('/\\')
         exp_name = os.path.basename(ckpt_save_path)
 
-        # 找到目录中最新的检查点
-        ckpt_files = glob.glob(os.path.join(ckpt_save_path, '*.pt'))
+        # 找到目录中最新的 model 检查点（排除 critic_*.pt）
+        ckpt_files = glob.glob(os.path.join(ckpt_save_path, 'model_*.pt'))
         if ckpt_files:
             # 按修改时间排序，取最新的
             latest_ckpt = max(ckpt_files, key=os.path.getmtime)
             resume_model_path = latest_ckpt
             print(f"Resuming from checkpoint: {latest_ckpt}")
         else:
-            print(f"Warning: No checkpoint files found in {ckpt_save_path}")
+            print(f"Warning: No model checkpoint files found in {ckpt_save_path}")
             resume_model_path = None
     else:
         # 新训练：生成新的实验名称

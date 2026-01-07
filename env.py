@@ -160,6 +160,14 @@ class MahjongGBEnv():
     
     def _done(self):
         return self.done
+
+    def get_global_hands(self):
+        """获取所有玩家的手牌（用于 CTDE Critic）
+
+        Returns:
+            dict: {player_id: list of tiles} 所有玩家的手牌
+        """
+        return {i: list(self.hands[i]) for i in range(4)}
     
     def _drawTile(self, player):
         if self.duplicate:

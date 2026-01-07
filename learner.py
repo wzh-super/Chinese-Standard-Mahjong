@@ -9,7 +9,75 @@ from torch.utils.tensorboard import SummaryWriter
 
 from replay_buffer import ReplayBuffer
 from model_pool import ModelPoolServer
-from model import CNNModel
+from model import CNNModel, CentralizedCritic
+
+
+def compute_gae_from_trajectories(batch, values, gamma, lam):
+    """
+    根据轨迹信息计算 GAE (Generalized Advantage Estimation)
+
+    Args:
+        batch: dict 包含 reward, done, traj_id, t
+        values: numpy array, 每个样本的 V(s) 估计
+        gamma: 折扣因子
+        lam: GAE lambda 参数
+
+    Returns:
+        advantages: numpy array
+        targets: numpy array (V-target for critic training)
+    """
+    n_samples = len(values)
+    advantages = np.zeros(n_samples, dtype=np.float32)
+    targets = np.zeros(n_samples, dtype=np.float32)
+
+    rewards = batch['reward']
+    dones = batch['done']
+    traj_ids = batch['traj_id']
+    t_steps = batch['t']
+
+    # 按 traj_id 分组
+    unique_trajs = np.unique(traj_ids)
+
+    for traj_id in unique_trajs:
+        # 找到该轨迹的所有样本
+        traj_mask = traj_ids == traj_id
+        traj_indices = np.where(traj_mask)[0]
+
+        # 按时间步排序
+        traj_t = t_steps[traj_indices]
+        sort_order = np.argsort(traj_t)
+        sorted_indices = traj_indices[sort_order]
+
+        # 获取该轨迹的数据
+        traj_rewards = rewards[sorted_indices]
+        traj_dones = dones[sorted_indices]
+        traj_values = values[sorted_indices]
+
+        T = len(sorted_indices)
+        traj_advs = np.zeros(T, dtype=np.float32)
+        traj_targets = np.zeros(T, dtype=np.float32)
+
+        # 从后往前计算 GAE
+        gae = 0.0
+        for i in reversed(range(T)):
+            # 显式使用 (1 - done) 作为 terminal mask，更稳健
+            not_done = 1.0 - float(traj_dones[i])
+            next_value = traj_values[i + 1] if i + 1 < T else 0.0
+
+            # delta = r + gamma * (1-done) * V_next - V
+            delta = traj_rewards[i] + gamma * not_done * next_value - traj_values[i]
+            # GAE: A_t = delta_t + gamma * lambda * (1-done) * A_{t+1}
+            gae = delta + gamma * lam * not_done * gae
+
+            traj_advs[i] = gae
+            traj_targets[i] = traj_advs[i] + traj_values[i]  # target = adv + V
+
+        # 写回原数组
+        advantages[sorted_indices] = traj_advs
+        targets[sorted_indices] = traj_targets
+
+    return advantages, targets
+
 
 class Learner(Process):
     
@@ -72,59 +140,28 @@ class Learner(Process):
         model_pool.push(model.state_dict()) # push cpu-only tensor to model_pool
         current_policy_id = 0  # 初始模型版本
         model = model.to(device)
-        
-        # training
-        optimizer = torch.optim.Adam(model.parameters(), lr = self.config['lr'])
+
+        # CTDE: 创建独立的集中式 Critic
+        critic = CentralizedCritic()
+        critic = critic.to(device)
+
+        # training - 分别为 Actor 和 Critic 创建优化器
+        actor_optimizer = torch.optim.Adam(model.parameters(), lr=self.config['lr'])
+        critic_optimizer = torch.optim.Adam(critic.parameters(), lr=self.config['lr'])
 
         # 学习率调度：带最小值限制的指数衰减
         lr_min = self.config.get('lr_min', 1e-5)  # 学习率下限
         lr_decay_steps = self.config.get('lr_decay_steps', 5000)  # 每隔多少步衰减
         lr_decay_rate = self.config.get('lr_decay_rate', 0.8)  # 衰减系数
-        
+
         # wait for initial samples
         while self.replay_buffer.size() < self.config['min_sample']:
             time.sleep(0.1)
 
-        # === Value预热阶段：冻结Policy，只训练Value ===
-        # 继续训练时跳过 warmup
-        value_warmup_steps = self.config.get('value_warmup_steps', 1000)
-        if resume_path:
-            value_warmup_steps = 0
-            print("Skipping value warmup (resuming from checkpoint)")
-        if value_warmup_steps > 0:
-            print(f"Starting value warmup for {value_warmup_steps} steps...")
-            # 冻结backbone和policy头
-            for name, param in model.named_parameters():
-                if '_value_branch' not in name:
-                    param.requires_grad = False
-
-            value_optimizer = torch.optim.Adam(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=self.config['lr'] * 10  # value学习率可以更高
-            )
-
-            for warmup_step in range(value_warmup_steps):
-                batch = self.replay_buffer.sample(self.config['batch_size'])
-                obs = torch.tensor(batch['state']['observation']).to(device)
-                mask = torch.tensor(batch['state']['action_mask']).to(device)
-                states = {'observation': obs, 'action_mask': mask}
-                targets = torch.tensor(batch['target']).to(device)
-
-                model.train(True)
-                _, values = model(states)
-                value_loss = F.mse_loss(values.squeeze(-1), targets)
-
-                value_optimizer.zero_grad()
-                value_loss.backward()
-                value_optimizer.step()
-
-                if (warmup_step + 1) % 100 == 0:
-                    print(f"Value warmup step {warmup_step + 1}/{value_warmup_steps}, loss: {value_loss.item():.4f}")
-
-            # 解冻所有参数
-            for param in model.parameters():
-                param.requires_grad = True
-            print("Value warmup completed!")
+        # CTDE 说明：Critic warmup 已移除
+        # 由于 Actor 不再计算 target，warmup 需要先用 critic 前向算 V
+        # 简化起见，让主训练循环直接训练 critic
+        # 如果需要 warmup，可以在收集首批数据后做几轮纯 critic 更新
 
         cur_time = time.time()
         iterations = 0
@@ -151,36 +188,56 @@ class Learner(Process):
 
             if n_stale > 0:
                 print(f'Filtered out {n_stale} stale samples (policy_id < {current_policy_id - max_staleness})')
-                # 过滤所有数据
+                # 过滤所有数据（新格式：reward, done, traj_id, t）
                 batch = {
                     'state': {
                         'observation': batch['state']['observation'][fresh_mask],
-                        'action_mask': batch['state']['action_mask'][fresh_mask]
+                        'action_mask': batch['state']['action_mask'][fresh_mask],
+                        'other_hands': batch['state']['other_hands'][fresh_mask]  # CTDE: 12×4×9
                     },
                     'action': batch['action'][fresh_mask],
                     'log_prob': batch['log_prob'][fresh_mask],
-                    'adv': batch['adv'][fresh_mask],
-                    'target': batch['target'][fresh_mask],
+                    'reward': batch['reward'][fresh_mask],
+                    'done': batch['done'][fresh_mask],
+                    'traj_id': batch['traj_id'][fresh_mask],
+                    't': batch['t'][fresh_mask],
                     'policy_id': batch['policy_id'][fresh_mask]
                 }
 
             total_samples = len(batch['action'])
 
+            # ==================== CTDE: 用 Critic 计算 V，然后算 GAE ====================
             obs = torch.tensor(batch['state']['observation']).to(device)
             mask = torch.tensor(batch['state']['action_mask']).to(device)
+            other_hands = torch.tensor(batch['state']['other_hands']).to(device)  # CTDE: 12×4×9
+            # 拼接成全局观测供 Critic 使用
+            global_obs = torch.cat([obs, other_hands], dim=1)  # 147 + 12 = 159
+
+            # 用 Critic 前向计算所有样本的 V(s)
+            critic.eval()
+            with torch.no_grad():
+                values_tensor = critic(global_obs).squeeze(-1)
+                values_np = values_tensor.cpu().numpy()
+
+            # 用轨迹信息计算 GAE
+            advantages_np, targets_np = compute_gae_from_trajectories(
+                batch, values_np, self.config['gamma'], self.config['lambda']
+            )
+
+            # 转为 tensor
             states = {
                 'observation': obs,
                 'action_mask': mask
             }
             actions = torch.tensor(batch['action']).unsqueeze(-1).to(device)
-            # 直接使用 actor 存储的 log_prob，这是真正的行为策略 log_prob
             old_log_probs = torch.tensor(batch['log_prob']).unsqueeze(-1).to(device)
-            advs = torch.tensor(batch['adv']).to(device)
+            advs = torch.tensor(advantages_np).to(device)
             advs = (advs - advs.mean()) / (advs.std() + 1e-8)  # Advantage归一化
-            targets = torch.tensor(batch['target']).to(device)
+            targets = torch.tensor(targets_np).to(device)
 
-            print('Iteration %d, samples collected %d, total episodes %d' % (
-                iterations, total_samples, self.replay_buffer.stats['episode_in']))
+            print('Iteration %d, samples collected %d, total episodes %d, unique trajectories %d' % (
+                iterations, total_samples, self.replay_buffer.stats['episode_in'],
+                len(np.unique(batch['traj_id']))))
 
             # ==================== PPO 训练：多个 epoch，每个 epoch 遍历所有 mini-batch ====================
             batch_size = self.config['batch_size']
@@ -197,23 +254,29 @@ class Learner(Process):
                         'observation': obs[mb_indices],
                         'action_mask': mask[mb_indices]
                     }
+                    mb_global_obs = global_obs[mb_indices]  # CTDE
                     mb_actions = actions[mb_indices]
                     mb_advs = advs[mb_indices]
                     mb_targets = targets[mb_indices]
                     mb_old_log_probs = old_log_probs[mb_indices]
 
+                    # ========== Actor 前向传播 ==========
                     model.train(True)
-                    logits, values = model(mb_states)
+                    logits, _ = model(mb_states)  # 不使用 model 的 value 输出
                     action_dist = torch.distributions.Categorical(logits=logits)
                     probs = F.softmax(logits, dim=1).gather(1, mb_actions)
                     log_probs = torch.log(probs + 1e-8)
+
+                    # ========== CTDE Critic 前向传播 ==========
+                    critic.train(True)
+                    values = critic(mb_global_obs)
 
                     # PPO ratio 使用真正的 old_log_probs（actor 采样时的策略）
                     ratio = torch.exp(log_probs - mb_old_log_probs)
                     surr1 = ratio * mb_advs.unsqueeze(-1)
                     surr2 = torch.clamp(ratio, 1 - self.config['clip'], 1 + self.config['clip']) * mb_advs.unsqueeze(-1)
                     policy_loss = -torch.mean(torch.min(surr1, surr2))
-                    value_loss = torch.mean(F.mse_loss(values.squeeze(-1), mb_targets))
+                    value_loss = F.mse_loss(values.squeeze(-1), mb_targets)
                     entropy_loss = -torch.mean(action_dist.entropy())
 
                     # 动态调整 KL 约束
@@ -237,11 +300,20 @@ class Learner(Process):
                         current_probs = F.softmax(logits, dim=1)
                         kl_loss = torch.mean(torch.sum(pretrain_probs * (torch.log(pretrain_probs + 1e-8) - torch.log(current_probs + 1e-8)), dim=1))
 
-                    loss = policy_loss + self.config['value_coeff'] * value_loss + entropy_coeff * entropy_loss + kl_coeff * kl_loss
-                    optimizer.zero_grad()
-                    loss.backward()
+                    # ========== 分别更新 Actor 和 Critic ==========
+                    # Actor loss: policy + entropy + KL
+                    actor_loss = policy_loss + entropy_coeff * entropy_loss + kl_coeff * kl_loss
+                    actor_optimizer.zero_grad()
+                    actor_loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
-                    optimizer.step()
+                    actor_optimizer.step()
+
+                    # Critic loss: value
+                    critic_loss = self.config['value_coeff'] * value_loss
+                    critic_optimizer.zero_grad()
+                    critic_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(critic.parameters(), max_norm=0.5)
+                    critic_optimizer.step()
 
             # push new model（每轮更新完 push 一次）
             model = model.to('cpu')
@@ -250,13 +322,14 @@ class Learner(Process):
             model = model.to(device)
 
             # log to tensorboard
-            current_lr = optimizer.param_groups[0]['lr']
+            current_lr = actor_optimizer.param_groups[0]['lr']
             total_episodes = self.replay_buffer.stats['episode_in']
             writer.add_scalar('Loss/policy', policy_loss.item(), iterations)
             writer.add_scalar('Loss/value', value_loss.item(), iterations)
             writer.add_scalar('Loss/entropy', entropy_loss.item(), iterations)
             writer.add_scalar('Loss/kl', kl_loss.item(), iterations)
-            writer.add_scalar('Loss/total', loss.item(), iterations)
+            writer.add_scalar('Loss/actor_total', actor_loss.item(), iterations)
+            writer.add_scalar('Loss/critic_total', critic_loss.item(), iterations)
             writer.add_scalar('Stats/advantage_mean', advs.mean().item(), iterations)
             writer.add_scalar('Stats/advantage_std', advs.std().item(), iterations)
             writer.add_scalar('Stats/value_mean', values.mean().item(), iterations)
@@ -273,17 +346,21 @@ class Learner(Process):
                     recent_avg = sum(self.replay_buffer.reward_stats['recent']) / len(self.replay_buffer.reward_stats['recent'])
                     writer.add_scalar('Stats/episode_reward_recent', recent_avg, iterations)
 
-            # 学习率衰减
+            # 学习率衰减（同时更新 Actor 和 Critic）
             if (iterations + 1) % lr_decay_steps == 0 and current_lr > lr_min:
                 new_lr = max(current_lr * lr_decay_rate, lr_min)
-                for param_group in optimizer.param_groups:
+                for param_group in actor_optimizer.param_groups:
+                    param_group['lr'] = new_lr
+                for param_group in critic_optimizer.param_groups:
                     param_group['lr'] = new_lr
                 print(f'Learning rate decayed: {current_lr:.2e} -> {new_lr:.2e}')
 
-            # save checkpoints
+            # save checkpoints（同时保存 Actor 和 Critic）
             t = time.time()
             if t - cur_time > self.config['ckpt_save_interval']:
-                path = os.path.join(ckpt_path, 'model_%d.pt' % iterations)
-                torch.save(model.state_dict(), path)
+                actor_path = os.path.join(ckpt_path, 'model_%d.pt' % iterations)
+                critic_path = os.path.join(ckpt_path, 'critic_%d.pt' % iterations)
+                torch.save(model.state_dict(), actor_path)
+                torch.save(critic.state_dict(), critic_path)
                 cur_time = t
             iterations += 1

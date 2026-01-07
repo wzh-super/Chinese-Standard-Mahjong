@@ -62,7 +62,7 @@ class CNNModel(nn.Module):
             nn.Linear(256, 235)
         )
 
-        # 价值头
+        # 价值头（用于非 CTDE 模式，或 actor 推理时的快速 value 估计）
         self._value_branch = nn.Sequential(
             nn.Flatten(),
             nn.Linear(channels * 4 * 9, 512),
@@ -107,6 +107,81 @@ class CNNModel(nn.Module):
         masked_logits = logits + inf_mask
 
         return masked_logits, value
+
+
+class CentralizedCritic(nn.Module):
+    """
+    集中式 Critic 网络 (用于 CTDE)
+
+    输入全局观测（包含所有玩家手牌信息），输出价值估计。
+    与 Actor 分离，只在训练时使用。
+
+    输入: 159 × 4 × 9 (147 原有观测 + 12 其他玩家手牌)
+    输出: 1 (价值估计)
+    """
+
+    def __init__(self, num_res_blocks=8, channels=128, in_channels=159):
+        super().__init__()
+
+        self.num_res_blocks = num_res_blocks
+        self.channels = channels
+        self.in_channels = in_channels
+
+        # 输入卷积层
+        self.input_conv = nn.Conv2d(in_channels, channels, 3, 1, 1, bias=False)
+        self.input_bn = nn.BatchNorm2d(channels)
+
+        # 残差块
+        self.res_blocks = nn.ModuleList([
+            ResBlock(channels) for _ in range(num_res_blocks)
+        ])
+
+        # 价值头
+        self._value_branch = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(channels * 4 * 9, 512),
+            nn.ReLU(True),
+            nn.Linear(512, 256),
+            nn.ReLU(True),
+            nn.Linear(256, 1)
+        )
+
+        # 初始化权重
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, global_obs):
+        """
+        Args:
+            global_obs: Tensor of shape (batch, 159, 4, 9)
+
+        Returns:
+            value: Tensor of shape (batch, 1)
+        """
+        x = global_obs.float()
+
+        # 输入层
+        x = F.relu(self.input_bn(self.input_conv(x)))
+
+        # 残差块
+        for res_block in self.res_blocks:
+            x = res_block(x)
+
+        # 价值输出
+        value = self._value_branch(x)
+
+        return value
 
 
 # 保留旧版本用于加载旧checkpoint（可选）
