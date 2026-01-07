@@ -220,21 +220,32 @@ class Actor(Process):
                 'value' : [],
                 'log_prob': []  # 存储采样时的 log_prob，用于严格 on-policy PPO
             } for agent_name in env.agent_names}
+            auto_pass_counts = {agent_name: 0 for agent_name in env.agent_names}  # debug统计
             done = False
             while not done:
                 # each player take action
                 actions = {}
-                values = {}
                 for agent_name in obs:
-                    agent_data = episode_data[agent_name]
                     state = obs[agent_name]
+                    action_mask = state['action_mask']
+
+                    # ========== 自动过牌：只有 Pass 合法时直接过，不产数据 ==========
+                    valid_actions = np.where(action_mask > 0)[0]
+                    if len(valid_actions) == 1 and valid_actions[0] == 0:
+                        actions[agent_name] = 0  # Pass
+                        auto_pass_counts[agent_name] += 1
+                        continue  # 跳过数据记录
+
+                    # ========== 正常采样流程 ==========
+                    agent_data = episode_data[agent_name]
+                    # 记录 state
                     agent_data['state']['observation'].append(state['observation'])
                     agent_data['state']['action_mask'].append(state['action_mask'])
 
                     # 根据玩家类型选择动作
                     if player_types[agent_name] == OPPONENT_RANDOM:
                         # 随机策略：从合法动作中随机选
-                        valid_actions = np.where(state['action_mask'] > 0)[0]
+                        valid_actions = np.where(action_mask > 0)[0]
                         action = np.random.choice(valid_actions)
                         value = 0.0  # 随机策略没有value估计
                         log_prob = 0.0  # 随机策略的 log_prob 不重要（不会被采样）
@@ -256,7 +267,6 @@ class Actor(Process):
                             value = value_tensor.item()
 
                     actions[agent_name] = action
-                    values[agent_name] = value
                     agent_data['action'].append(action)
                     agent_data['value'].append(value)
                     agent_data['log_prob'].append(log_prob)
@@ -273,17 +283,18 @@ class Actor(Process):
                     episode_data[agent_name]['reward'][-1] = rewards[agent_name]
 
             # 打印对局信息
+            total_auto_pass = sum(auto_pass_counts.values())
             if self.self_play_mode:
                 pretrain_name = f'player_{pretrain_player_idx + 1}' if pretrain_player_idx >= 0 else 'None'
                 # 输出每个玩家的reward
                 reward_strs = [f"P{i+1}:{rewards[f'player_{i+1}']:.1f}" for i in range(4)]
-                print(f"{self.name} Ep {episode} Model {latest['id']} Pretrain [{pretrain_name}] Rewards [{', '.join(reward_strs)}]")
+                print(f"{self.name} Ep {episode} Model {latest['id']} Pretrain [{pretrain_name}] Rewards [{', '.join(reward_strs)}] AutoPass {total_auto_pass}")
             else:
                 opp_type_str = ','.join([player_types[f'player_{i+1}'] for i in range(4) if player_types.get(f'player_{i+1}') != 'main'])
                 main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
                 # 输出每个玩家的reward
                 reward_strs = [f"P{i+1}:{rewards[f'player_{i+1}']:.1f}" for i in range(4)]
-                print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Rewards [{', '.join(reward_strs)}]")
+                print(f"{self.name} Ep {episode} Model {latest['id']} Main {main_player_name} Opp [{opp_type_str}] Rewards [{', '.join(reward_strs)}] AutoPass {total_auto_pass}")
 
             # ==================== 数据采样 ====================
             # 记录当前使用的模型版本（用于 staleness 过滤）
@@ -294,6 +305,9 @@ class Actor(Process):
                 for agent_name, agent_data in episode_data.items():
                     # 跳过预训练对手的数据
                     if player_types[agent_name] == OPPONENT_PRETRAIN:
+                        continue
+                    # 跳过空数据（所有动作都是自动过牌）
+                    if len(agent_data['action']) == 0:
                         continue
 
                     obs_arr = np.stack(agent_data['state']['observation'])
@@ -332,6 +346,10 @@ class Actor(Process):
                 # 原有模式：只采样主玩家
                 main_player_name = [name for name, ptype in player_types.items() if ptype == 'main'][0]
                 agent_data = episode_data[main_player_name]
+                # 跳过空数据（所有动作都是自动过牌）
+                if len(agent_data['action']) == 0:
+                    continue
+
                 obs_arr = np.stack(agent_data['state']['observation'])
                 mask = np.stack(agent_data['state']['action_mask'])
                 actions_arr = np.array(agent_data['action'], dtype=np.int64)
