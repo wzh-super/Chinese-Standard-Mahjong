@@ -143,11 +143,33 @@ class Learner(Process):
 
         # CTDE: 创建独立的集中式 Critic
         critic = CentralizedCritic()
+
+        # 加载 Critic checkpoint（如果有）
+        resume_critic_path = self.config.get('resume_critic_path')
+        if resume_critic_path and os.path.exists(resume_critic_path):
+            print(f"Resuming critic from: {resume_critic_path}")
+            critic.load_state_dict(torch.load(resume_critic_path, map_location='cpu'))
+            print("Critic resumed successfully!")
+
         critic = critic.to(device)
 
         # training - 分别为 Actor 和 Critic 创建优化器
         actor_optimizer = torch.optim.Adam(model.parameters(), lr=self.config['lr'])
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=self.config['lr'])
+
+        # 加载 optimizer state（如果有）
+        resume_iteration = self.config.get('resume_iteration', 0)
+        if resume_iteration > 0:
+            # 尝试加载 optimizer state
+            optimizer_path = os.path.join(ckpt_path, f'optimizer_{resume_iteration - 1}.pt')
+            if os.path.exists(optimizer_path):
+                print(f"Resuming optimizers from: {optimizer_path}")
+                opt_state = torch.load(optimizer_path, map_location='cpu')
+                actor_optimizer.load_state_dict(opt_state['actor_optimizer'])
+                critic_optimizer.load_state_dict(opt_state['critic_optimizer'])
+                print("Optimizers resumed successfully!")
+            else:
+                print(f"Warning: Optimizer state {optimizer_path} not found, using fresh optimizers")
 
         # 学习率调度：带最小值限制的指数衰减
         lr_min = self.config.get('lr_min', 1e-5)  # 学习率下限
@@ -164,7 +186,7 @@ class Learner(Process):
         # 如果需要 warmup，可以在收集首批数据后做几轮纯 critic 更新
 
         cur_time = time.time()
-        iterations = 0
+        iterations = resume_iteration  # 从 resume_iteration 开始，避免覆盖旧 checkpoint
         samples_per_update = self.config.get('samples_per_update', 10000)  # 每轮收集的样本数
         max_staleness = self.config.get('max_staleness', 3)  # 最大允许的策略版本差
 
@@ -355,12 +377,18 @@ class Learner(Process):
                     param_group['lr'] = new_lr
                 print(f'Learning rate decayed: {current_lr:.2e} -> {new_lr:.2e}')
 
-            # save checkpoints（同时保存 Actor 和 Critic）
+            # save checkpoints（同时保存 Actor、Critic 和 Optimizer）
             t = time.time()
             if t - cur_time > self.config['ckpt_save_interval']:
                 actor_path = os.path.join(ckpt_path, 'model_%d.pt' % iterations)
                 critic_path = os.path.join(ckpt_path, 'critic_%d.pt' % iterations)
+                optimizer_path = os.path.join(ckpt_path, 'optimizer_%d.pt' % iterations)
                 torch.save(model.state_dict(), actor_path)
                 torch.save(critic.state_dict(), critic_path)
+                torch.save({
+                    'actor_optimizer': actor_optimizer.state_dict(),
+                    'critic_optimizer': critic_optimizer.state_dict(),
+                }, optimizer_path)
+                print(f'Checkpoint saved: iteration {iterations}')
                 cur_time = t
             iterations += 1

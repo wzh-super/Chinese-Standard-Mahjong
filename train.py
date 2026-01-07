@@ -27,21 +27,48 @@ if __name__ == '__main__':
         ckpt_save_path = args.resume.rstrip('/\\')
         exp_name = os.path.basename(ckpt_save_path)
 
-        # 找到目录中最新的 model 检查点（排除 critic_*.pt）
+        # 找到目录中最新的 model 检查点，按文件名中的数字排序
         ckpt_files = glob.glob(os.path.join(ckpt_save_path, 'model_*.pt'))
         if ckpt_files:
-            # 按修改时间排序，取最新的
-            latest_ckpt = max(ckpt_files, key=os.path.getmtime)
-            resume_model_path = latest_ckpt
-            print(f"Resuming from checkpoint: {latest_ckpt}")
+            # 从文件名解析 iteration 数字，选最大的
+            def get_iteration(path):
+                basename = os.path.basename(path)
+                # model_123.pt -> 123
+                try:
+                    return int(basename.replace('model_', '').replace('.pt', ''))
+                except ValueError:
+                    return -1
+
+            latest_iter = max(get_iteration(f) for f in ckpt_files)
+            resume_model_path = os.path.join(ckpt_save_path, f'model_{latest_iter}.pt')
+            resume_critic_path = os.path.join(ckpt_save_path, f'critic_{latest_iter}.pt')
+            resume_iteration = latest_iter + 1  # 从下一个 iteration 开始
+
+            if os.path.exists(resume_model_path):
+                print(f"Resuming actor from checkpoint: {resume_model_path}")
+            else:
+                print(f"Warning: {resume_model_path} not found")
+                resume_model_path = None
+
+            if os.path.exists(resume_critic_path):
+                print(f"Resuming critic from checkpoint: {resume_critic_path}")
+            else:
+                print(f"Warning: {resume_critic_path} not found")
+                resume_critic_path = None
+
+            print(f"Resuming from iteration: {resume_iteration}")
         else:
             print(f"Warning: No model checkpoint files found in {ckpt_save_path}")
             resume_model_path = None
+            resume_critic_path = None
+            resume_iteration = 0
     else:
         # 新训练：生成新的实验名称
         exp_name = datetime.now().strftime('%Y%m%d_%H%M%S')
         ckpt_save_path = os.path.join('./checkpoint/', exp_name)
         resume_model_path = None
+        resume_critic_path = None
+        resume_iteration = 0
 
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
@@ -90,7 +117,9 @@ if __name__ == '__main__':
 
         # === 预训练模型 ===
         'pretrain_path': args.pretrain,
-        'resume_model_path': resume_model_path,  # 继续训练时的检查点路径
+        'resume_model_path': resume_model_path,  # 继续训练时的 Actor 检查点路径
+        'resume_critic_path': resume_critic_path,  # 继续训练时的 Critic 检查点路径
+        'resume_iteration': resume_iteration,  # 继续训练时的起始 iteration
     }
     
     replay_buffer = ReplayBuffer(config['replay_buffer_size'], config['replay_buffer_episode'])
