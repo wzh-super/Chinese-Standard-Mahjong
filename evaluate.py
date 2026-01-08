@@ -13,17 +13,76 @@ from collections import defaultdict
 
 from env import MahjongGBEnv
 from feature_v2 import FeatureAgentV2
-from model import CNNModel
+from model import CNNModel, CNNModelSmall
+
+
+def infer_num_res_blocks(state_dict):
+    """
+    从 checkpoint 的键名推断残差块数量（用于兼容 8 blocks vs 16 blocks）。
+    期望键名形如：res_blocks.<idx>.conv1.weight
+    """
+    indices = set()
+    for key in state_dict.keys():
+        if not key.startswith('res_blocks.'):
+            continue
+        parts = key.split('.')
+        if len(parts) < 2:
+            continue
+        try:
+            indices.add(int(parts[1]))
+        except ValueError:
+            continue
+    return (max(indices) + 1) if indices else None
 
 
 def load_model(path, device='cpu'):
-    """加载模型"""
-    model = CNNModel()
-    if path:
-        model.load_state_dict(torch.load(path, map_location=device))
+    """加载模型（按后缀选择结构：`.pt` -> `CNNModel`，`.pkl` -> `CNNModelSmall`）"""
+    if not path:
+        raise ValueError("model path is required")
+
+    loaded = torch.load(path, map_location='cpu')
+
+    # 兼容两种保存格式：
+    # 1) torch.save(model.state_dict(), path)
+    # 2) torch.save({'state_dict' or 'model_state_dict': ...}, path)
+    if isinstance(loaded, dict) and isinstance(loaded.get('model_state_dict'), dict):
+        state_dict = loaded['model_state_dict']
+    elif isinstance(loaded, dict) and isinstance(loaded.get('state_dict'), dict):
+        state_dict = loaded['state_dict']
+    else:
+        state_dict = loaded
+
+    if not isinstance(state_dict, dict):
+        raise RuntimeError(f"Unrecognized checkpoint format at {path!r}: expected a state_dict-like mapping")
+
+    num_res_blocks = infer_num_res_blocks(state_dict)
+
+    if 'input_conv.weight' not in state_dict:
+        raise RuntimeError('Unrecognized checkpoint: missing input_conv.weight')
+
+    channels = int(state_dict['input_conv.weight'].shape[0])
+    in_channels = int(state_dict['input_conv.weight'].shape[1])
+
+    path_lower = str(path).lower()
+    if path_lower.endswith('.pkl') or path_lower.endswith('.pickle'):
+        model = CNNModelSmall(
+            num_res_blocks=num_res_blocks if num_res_blocks is not None else 8,
+            channels=channels,
+            in_channels=in_channels,
+        )
+    else:
+        model = CNNModel(
+            num_res_blocks=num_res_blocks if num_res_blocks is not None else 16,
+            channels=channels,
+            in_channels=in_channels,
+        )
+
+    model.load_state_dict(state_dict, strict=True)
     model.to(device)
     model.eval()
     return model
+
+
 
 
 def select_action(model, obs, device='cpu'):
@@ -251,7 +310,7 @@ if __name__ == '__main__':
     parser.add_argument('--current', type=str, required=True, help='当前模型路径')
     parser.add_argument('--baseline', type=str, required=True, help='基准模型路径')
     parser.add_argument('--games', type=int, default=100, help='对战局数')
-    parser.add_argument('--device', type=str, default='cpu', help='设备 (cpu/cuda)')
+    parser.add_argument('--device', type=str, default='cuda', help='设备 (cpu/cuda)')
 
     args = parser.parse_args()
 

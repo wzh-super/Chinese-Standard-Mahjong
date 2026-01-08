@@ -184,6 +184,72 @@ class CentralizedCritic(nn.Module):
         return value
 
 
+# 旧版 ResNet 结构：128 通道 + 8 个残差块 + 单隐层 head（用于兼容旧 checkpoint）
+class CNNModelSmall(nn.Module):
+    """
+    兼容旧模型 checkpoint 的结构（你描述的“原来的小模型”）：
+    - 输入卷积: in_channels -> 128
+    - 8 个残差块
+    - 策略头: 128*4*9 -> 512 -> 235
+    - 价值头: 128*4*9 -> 512 -> 1
+    """
+
+    def __init__(self, num_res_blocks=8, channels=128, in_channels=147):
+        super().__init__()
+
+        self.num_res_blocks = num_res_blocks
+        self.channels = channels
+        self.in_channels = in_channels
+
+        self.input_conv = nn.Conv2d(in_channels, channels, 3, 1, 1, bias=False)
+        self.input_bn = nn.BatchNorm2d(channels)
+        self.res_blocks = nn.ModuleList([ResBlock(channels) for _ in range(num_res_blocks)])
+
+        self._logits = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(channels * 4 * 9, 512),
+            nn.ReLU(True),
+            nn.Linear(512, 256),
+            nn.ReLU(True),
+            nn.Linear(256, 235)
+        )
+
+        self._value_branch = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(channels * 4 * 9, 512),
+            nn.ReLU(True),
+            nn.Linear(512, 256),
+            nn.ReLU(True),
+            nn.Linear(256, 1)
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(self, input_dict):
+        obs = input_dict["observation"].float()
+        x = F.relu(self.input_bn(self.input_conv(obs)))
+        for res_block in self.res_blocks:
+            x = res_block(x)
+        logits = self._logits(x)
+        value = self._value_branch(x)
+        mask = input_dict["action_mask"].float()
+        inf_mask = torch.clamp(torch.log(mask), -1e38, 1e38)
+        masked_logits = logits + inf_mask
+        return masked_logits, value
+
+
 # 保留旧版本用于加载旧checkpoint（可选）
 class CNNModelLegacy(nn.Module):
     """原始浅层网络，用于兼容旧模型"""
