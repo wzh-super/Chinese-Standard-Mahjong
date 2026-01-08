@@ -3,7 +3,7 @@
 
 用法:
     python supervised.py                           # 从头训练
-    python supervised.py --resume path/to/ckpt.pkl # 从checkpoint恢复
+    python supervised.py --resume path/to/ckpt.pt  # 从checkpoint恢复
 """
 
 from dataset import MahjongGBDataset
@@ -107,12 +107,12 @@ if __name__ == '__main__':
         writer.add_scalar('Accuracy/validation', acc, global_step=e)
 
         # Save checkpoint after each epoch
-        checkpoint_path = os.path.join(checkpoint_dir, f'epoch_{e + 1}.pkl')
+        checkpoint_path = os.path.join(checkpoint_dir, f'epoch_{e + 1}.pt')
         torch.save(model.state_dict(), checkpoint_path)
         print(f'Checkpoint saved: {checkpoint_path}')
 
     # Save final model for RL training
-    final_path = os.path.join(checkpoint_dir, 'final.pkl')
+    final_path = os.path.join(checkpoint_dir, 'final.pt')
     torch.save(model.state_dict(), final_path)
     print(f"\nTraining complete!")
     print(f"Final model: {final_path}")
