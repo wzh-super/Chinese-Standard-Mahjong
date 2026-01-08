@@ -41,7 +41,9 @@ if __name__ == '__main__':
 
             latest_iter = max(get_iteration(f) for f in ckpt_files)
             resume_model_path = os.path.join(ckpt_save_path, f'model_{latest_iter}.pt')
-            resume_critic_path = os.path.join(ckpt_save_path, f'critic_{latest_iter}.pt')
+            # Critic 仅保留最新：优先使用 critic_latest.pt；兼容旧命名 critic_<iter>.pt
+            critic_latest_path = os.path.join(ckpt_save_path, 'critic_latest.pt')
+            resume_critic_path = critic_latest_path if os.path.exists(critic_latest_path) else os.path.join(ckpt_save_path, f'critic_{latest_iter}.pt')
             resume_iteration = latest_iter + 1  # 从下一个 iteration 开始
 
             if os.path.exists(resume_model_path):
@@ -77,18 +79,18 @@ if __name__ == '__main__':
         'replay_buffer_episode': 500,     # 队列容量
         'model_pool_size': 50,            # 增大缓冲，避免历史模型被过快释放
         'model_pool_name': 'model-pool',
-        'num_actors': 24,                 # 25核留1核给learner
+        'num_actors': 22,                 # 给 learner/系统留余量，减少CPU争用
         'episodes_per_actor': 10000,    # 每个actor跑的局数（足够多，可手动停止）
 
         # === PPO 参数（On-Policy）===
-        'samples_per_update': 20000,      # 每轮收集的样本数（约 200-400 局）
+        'samples_per_update': 10000,      # 每轮收集的样本数（提高更新频率）
         'max_staleness': 3,               # 最大允许的策略版本差（过滤太旧的样本）
         'gamma': 0.99,                    # 折扣因子
         'lambda': 0.95,                   # GAE参数
-        'min_sample': 5000,               # 开始训练前的最小样本数
+        'min_sample': 2000,               # 更快进入第一次更新
         'value_warmup_steps': 2000,       # Value预热步数
-        'batch_size': 1024,               # mini-batch 大小
-        'epochs': 5,                      # 每批数据的PPO迭代次数
+        'batch_size': 2048,               # mini-batch 大小（减少每次更新的迭代步数）
+        'epochs': 3,                      # 每批数据的PPO迭代次数（降低单次更新耗时）
         'clip': 0.15,                     # PPO裁剪范围
         'lr': 5e-5,                       # 学习率
         'lr_min': 1e-5,                   # 学习率下限

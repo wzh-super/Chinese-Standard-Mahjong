@@ -377,18 +377,13 @@ class Learner(Process):
                     param_group['lr'] = new_lr
                 print(f'Learning rate decayed: {current_lr:.2e} -> {new_lr:.2e}')
 
-            # save checkpoints（同时保存 Actor、Critic 和 Optimizer）
+            # save checkpoints（保存 Actor；Critic 仅保留最新）
             t = time.time()
             if t - cur_time > self.config['ckpt_save_interval']:
                 actor_path = os.path.join(ckpt_path, 'model_%d.pt' % iterations)
-                critic_path = os.path.join(ckpt_path, 'critic_%d.pt' % iterations)
-                optimizer_path = os.path.join(ckpt_path, 'optimizer_%d.pt' % iterations)
+                critic_path = os.path.join(ckpt_path, 'critic_latest.pt')
                 torch.save(model.state_dict(), actor_path)
                 torch.save(critic.state_dict(), critic_path)
-                torch.save({
-                    'actor_optimizer': actor_optimizer.state_dict(),
-                    'critic_optimizer': critic_optimizer.state_dict(),
-                }, optimizer_path)
-                print(f'Checkpoint saved: iteration {iterations}')
+                print(f'Checkpoint saved: iteration {iterations} | actor={os.path.basename(actor_path)} | critic={os.path.basename(critic_path)}')
                 cur_time = t
             iterations += 1
