@@ -14,10 +14,10 @@ if __name__ == '__main__':
     parser.add_argument('--self-play', action='store_true', default=True, help='Enable self-play mode (default: enabled)')
     parser.add_argument('--no-self-play', action='store_false', dest='self_play', help='Disable self-play mode')
     parser.add_argument('--pretrain-prob', type=float, default=0.3, help='Probability of having one pretrain opponent per episode (only in self-play mode)')
-    parser.add_argument('--kl-init', type=float, default=0.02, help='Initial KL coefficient')
+    parser.add_argument('--kl-init', type=float, default=0.0, help='Initial KL coefficient')
     parser.add_argument('--kl-min', type=float, default=0.0, help='Minimum KL coefficient')
     parser.add_argument('--kl-decay-steps', type=int, default=10000, help='Steps to decay KL coefficient')
-    parser.add_argument('--reward-mode', type=str, default='sqrt', choices=['simple', 'sqrt', 'original'],
+    parser.add_argument('--reward-mode', type=str, default='original', choices=['simple', 'sqrt', 'original'],
                         help='Reward mode: simple(统一惩罚), sqrt(压缩但保留差异), original(原始)')
     args = parser.parse_args()
 
