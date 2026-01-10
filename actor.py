@@ -1,4 +1,5 @@
 from multiprocessing import Process
+import itertools
 import numpy as np
 import torch
 import random
@@ -44,6 +45,7 @@ class Actor(Process):
         阶段2 (2-6万局)：预训练为主，引入检查点
         阶段3 (6万+)：保持预训练，增加检查点
         """
+        episode += int(self.config.get('curriculum_episode_offset', 0))
         if episode < 20000:
             # 预训练85%, 自对弈15%
             r = random.random()
@@ -51,7 +53,7 @@ class Actor(Process):
                 return OPPONENT_PRETRAIN
             else:
                 return OPPONENT_LATEST
-        elif episode < 60000:
+        elif episode < 70000:
             # 预训练60%, 自对弈25%, 检查点15%
             r = random.random()
             if r < 0.60:
@@ -124,7 +126,9 @@ class Actor(Process):
             'reward_mode': self.config.get('reward_mode', 'simple')
         })
 
-        for episode in range(self.config['episodes_per_actor']):
+        episodes_per_actor = self.config.get('episodes_per_actor', 10000)
+        episode_iter = itertools.count() if episodes_per_actor <= 0 else range(episodes_per_actor)
+        for episode in episode_iter:
             # update main model to latest
             latest = model_pool.get_latest_model()
             if latest['id'] > version['id']:

@@ -51,6 +51,11 @@ class ModelPoolClient:
         while True:
             try:
                 self.shared_model_list = ShareableList(name = name)
+                # Client 只应连接共享内存，不应在退出时由 resource_tracker 自动 unlink（由 Server 统一管理）
+                try:
+                    _unregister_from_resource_tracker(self.shared_model_list.shm.name)
+                except Exception:
+                    pass
                 n = self.shared_model_list[-1]
                 break
             except:

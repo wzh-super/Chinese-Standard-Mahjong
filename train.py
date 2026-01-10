@@ -5,6 +5,9 @@ import argparse
 from datetime import datetime
 import os
 import glob
+import sys
+import time
+import signal
 
 if __name__ == '__main__':
     # 命令行参数
@@ -13,12 +16,19 @@ if __name__ == '__main__':
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint directory to resume training')
     parser.add_argument('--self-play', action='store_true', default=True, help='Enable self-play mode (default: enabled)')
     parser.add_argument('--no-self-play', action='store_false', dest='self_play', help='Disable self-play mode')
+    parser.add_argument('--num-actors', type=int, default=23, help='Number of actor processes')
+    parser.add_argument('--episodes-per-actor', type=int, default=10000,
+                        help='Episodes per actor (<=0 means run forever until Ctrl+C)')
     parser.add_argument('--pretrain-prob', type=float, default=0.3, help='Probability of having one pretrain opponent per episode (only in self-play mode)')
-    parser.add_argument('--kl-init', type=float, default=0.0, help='Initial KL coefficient')
-    parser.add_argument('--kl-min', type=float, default=0.0, help='Minimum KL coefficient')
+    parser.add_argument('--kl-init', type=float, default=0.05, help='Initial KL coefficient')
+    parser.add_argument('--kl-min', type=float, default=0.01, help='Minimum KL coefficient')
     parser.add_argument('--kl-decay-steps', type=int, default=10000, help='Steps to decay KL coefficient')
     parser.add_argument('--reward-mode', type=str, default='original', choices=['simple', 'sqrt', 'original'],
                         help='Reward mode: simple(统一惩罚), sqrt(压缩但保留差异), original(原始)')
+    parser.add_argument('--ckpt-save-interval', type=int, default=1800,
+                        help='Checkpoint save interval in seconds (default: 1800)')
+    parser.add_argument('--curriculum-episode-offset', type=int, default=None,
+                        help='Curriculum episode offset (default: 20000 when --resume else 0)')
     args = parser.parse_args()
 
     # 确定实验名称和检查点路径
@@ -72,6 +82,11 @@ if __name__ == '__main__':
         resume_critic_path = None
         resume_iteration = 0
 
+    if args.curriculum_episode_offset is None:
+        curriculum_episode_offset = 20000 if args.resume else 0
+    else:
+        curriculum_episode_offset = args.curriculum_episode_offset
+
     # 硬件配置: RTX 4090 (24GB) + 25核 CPU + 90GB 内存
     config = {
         # === 经验收集 ===
@@ -79,8 +94,8 @@ if __name__ == '__main__':
         'replay_buffer_episode': 500,     # 队列容量
         'model_pool_size': 50,            # 增大缓冲，避免历史模型被过快释放
         'model_pool_name': 'model-pool',
-        'num_actors': 22,                 # 给 learner/系统留余量，减少CPU争用
-        'episodes_per_actor': 10000,    # 每个actor跑的局数（足够多，可手动停止）
+        'num_actors': args.num_actors,    # 给 learner/系统留余量，减少CPU争用
+        'episodes_per_actor': args.episodes_per_actor,  # <=0 表示一直跑到手动停止
 
         # === PPO 参数（On-Policy）===
         'samples_per_update': 10000,      # 每轮收集的样本数（提高更新频率）
@@ -110,12 +125,15 @@ if __name__ == '__main__':
 
         # === 奖励模式 ===
         'reward_mode': args.reward_mode,  # simple/sqrt/original
+        'curriculum_episode_offset': curriculum_episode_offset,  # 课程学习的 episode 偏移（继续训练时跳过前期）
 
         # === 保存 ===
         'device': 'cuda',
-        'ckpt_save_interval': 300,        # 5分钟保存一次
+        'ckpt_save_interval': args.ckpt_save_interval,  # 保存间隔（秒）
         'ckpt_save_path': ckpt_save_path, # 本次运行的检查点目录
         'exp_name': exp_name,             # 实验名称
+        'save_on_exit': True,             # Ctrl+C / SIGTERM 时保存最新模型
+        'save_on_sigterm': False,         # 默认不在 SIGTERM 时保存（避免 terminate() 触发）
 
         # === 预训练模型 ===
         'pretrain_path': args.pretrain,
@@ -133,9 +151,11 @@ if __name__ == '__main__':
     if config['self_play_mode']:
         print(f"  Pretrain opponent probability: {config['pretrain_prob']}")
     print(f"  Reward mode: {config['reward_mode']}")
+    print(f"  Curriculum episode offset: {config['curriculum_episode_offset']}")
     print(f"  KL coefficient: {config['kl_coeff_init']} -> {config['kl_coeff_min']} over {config['kl_decay_steps']} steps")
     print(f"  Pretrain model: {config['pretrain_path']}")
     print(f"  Checkpoint path: {config['ckpt_save_path']}")
+    print(f"  Checkpoint interval (sec): {config['ckpt_save_interval']}")
     print("=" * 50)
 
     actors = []
@@ -145,8 +165,68 @@ if __name__ == '__main__':
         actors.append(actor)
     learner = Learner(config, replay_buffer)
     
-    for actor in actors: actor.start()
-    learner.start()
-    
-    for actor in actors: actor.join()
-    learner.terminate()
+    failure = False
+    interrupted = False
+    try:
+        for actor in actors:
+            actor.start()
+        learner.start()
+
+        while True:
+            if not learner.is_alive():
+                print(f'[train.py] Learner exited early (exitcode={learner.exitcode})')
+                failure = True
+                break
+
+            all_actors_done = True
+            for actor in actors:
+                if actor.is_alive():
+                    all_actors_done = False
+                    continue
+                if actor.exitcode not in (0, None):
+                    print(f'[train.py] {actor.name} crashed (exitcode={actor.exitcode})')
+                    failure = True
+                    break
+            if failure or all_actors_done:
+                break
+            time.sleep(5)
+    except KeyboardInterrupt:
+        interrupted = True
+        print('[train.py] KeyboardInterrupt, stopping...')
+        # 先优雅通知子进程，给 Learner 机会保存最新 checkpoint
+        procs = actors + [learner]
+        for p in procs:
+            if p.is_alive() and p.pid:
+                try:
+                    p.send_signal(signal.SIGINT)
+                except Exception:
+                    try:
+                        os.kill(p.pid, signal.SIGINT)
+                    except Exception:
+                        pass
+    finally:
+        procs = actors + [learner]
+
+        # 给优雅退出留一点时间（尤其是保存 checkpoint）
+        if interrupted:
+            deadline = time.time() + 30
+            for p in procs:
+                remaining = max(0.0, deadline - time.time())
+                try:
+                    p.join(timeout=remaining)
+                except Exception:
+                    pass
+
+        # 仍未退出则强制终止
+        for p in procs:
+            if p.is_alive():
+                p.terminate()
+
+        for p in procs:
+            try:
+                p.join()
+            except Exception:
+                pass
+
+    if failure:
+        sys.exit(1)

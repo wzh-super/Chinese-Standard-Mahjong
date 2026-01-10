@@ -2,6 +2,7 @@ from multiprocessing import Process
 import os
 import time
 from datetime import datetime
+import signal
 import numpy as np
 import torch
 from torch.nn import functional as F
@@ -90,6 +91,48 @@ class Learner(Process):
         # 使用config中预先生成的实验名称和检查点路径
         exp_name = self.config.get('exp_name', datetime.now().strftime('%Y%m%d_%H%M%S'))
         ckpt_path = self.config.get('ckpt_save_path', './checkpoint/')
+        save_on_exit = self.config.get('save_on_exit', True)
+        state = {
+            'model': None,
+            'critic': None,
+            'iterations': self.config.get('resume_iteration', 0),
+        }
+
+        def _save_latest_checkpoint(reason):
+            if not save_on_exit:
+                return
+            if state['model'] is None or state['critic'] is None:
+                return
+            try:
+                iteration = int(state['iterations'])
+            except Exception:
+                iteration = 0
+            try:
+                actor_path = os.path.join(ckpt_path, 'model_%d.pt' % iteration)
+                critic_path = os.path.join(ckpt_path, 'critic_latest.pt')
+                torch.save(state['model'].state_dict(), actor_path)
+                torch.save(state['critic'].state_dict(), critic_path)
+                print(f'[learner.py] Saved checkpoint ({reason}): iteration {iteration} | actor={os.path.basename(actor_path)} | critic={os.path.basename(critic_path)}')
+            except Exception as e:
+                print(f'[learner.py] Failed to save checkpoint ({reason}): {e}')
+
+        def _handle_stop_signal(signum, frame):
+            if signum == signal.SIGINT:
+                print(f'[learner.py] Received signal {signum} (SIGINT), saving latest checkpoint...')
+                _save_latest_checkpoint(reason='sigint')
+            else:
+                save_on_sigterm = self.config.get('save_on_sigterm', False)
+                if save_on_sigterm:
+                    print(f'[learner.py] Received signal {signum}, saving latest checkpoint...')
+                    _save_latest_checkpoint(reason=f'signal-{signum}')
+                else:
+                    print(f'[learner.py] Received signal {signum}, exiting without saving (set save_on_sigterm=True to enable)')
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, _handle_stop_signal)
+        signal.signal(signal.SIGINT, _handle_stop_signal)
+        if hasattr(signal, 'SIGHUP'):
+            signal.signal(signal.SIGHUP, _handle_stop_signal)
 
         # create checkpoint directory if not exists
         if not os.path.exists(ckpt_path):
@@ -152,6 +195,8 @@ class Learner(Process):
             print("Critic resumed successfully!")
 
         critic = critic.to(device)
+        state['model'] = model
+        state['critic'] = critic
 
         # training - 分别为 Actor 和 Critic 创建优化器
         actor_optimizer = torch.optim.Adam(model.parameters(), lr=self.config['lr'])
@@ -194,6 +239,8 @@ class Learner(Process):
             # ==================== On-Policy PPO: 等待收集足够样本 ====================
             while self.replay_buffer.size() < samples_per_update:
                 time.sleep(0.1)
+
+            state['iterations'] = iterations
 
             # 原子操作：取出所有样本并清空 buffer，避免丢失期间 push 的数据
             batch = self.replay_buffer.get_all_and_clear()
