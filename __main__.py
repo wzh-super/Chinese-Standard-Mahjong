@@ -459,7 +459,7 @@ def obs2response(model, obs):
 
 if __name__ == '__main__':
     model = CNNModel()
-    data_dir = '/data/epoch_8.pkl'
+    data_dir = '/data/model_4265.pth'
     model.load_state_dict(torch.load(data_dir, map_location=torch.device('cpu')))
     model.train(False)
 

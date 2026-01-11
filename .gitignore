@@ -12,3 +12,4 @@ supervised_runs/
 *.pth
 *.pkl
 output.txt
+*.pdf
